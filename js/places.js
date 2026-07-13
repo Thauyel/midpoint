@@ -42,6 +42,9 @@ const BASE_BACKOFF_MS = 600;
 // pathologically slow (30s+ before any response) -- we'd rather fail fast
 // and try the next mirror.
 const ENDPOINT_TIMEOUT_MS = 8000;
+// Per-anchor timeout (ms) for the multi-anchor Nominatim search. With 8
+// anchors and a 5s budget each, the worst-case POI scan completes in 40s.
+const ANCHOR_TIMEOUT_MS = 5000;
 
 const cache = new Map();
 const inflight = new Map();
@@ -396,8 +399,12 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
   const seen = []; // for ~30m dedup
   for (const anchor of anchors) {
     if (signal?.aborted) return all;
+    // Per-anchor timeout so a slow anchor doesn't drag out the whole search.
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), ANCHOR_TIMEOUT_MS);
     try {
-      const places = await nominatimPoiSearch(anchor, categories, radiusM, signal);
+      const places = await nominatimPoiSearch(anchor, categories, radiusM, ctl.signal);
+      clearTimeout(timer);
       for (const p of places) {
         const dupe = seen.some((q) =>
           Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
@@ -409,6 +416,7 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
         if (all.length >= 60) return all; // hard cap
       }
     } catch {
+      clearTimeout(timer);
       // one anchor failing shouldn't kill the whole search
     }
   }

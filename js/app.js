@@ -3,16 +3,16 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=10";
-import { findPlaces, findPlacesAlong } from "./places.js?v=10";
-import { osrmTable } from "./routing.js?v=10";
-import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing } from "./midpoint.js?v=10";
-import { MidpointMap } from "./map.js?v=10";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=10";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=11";
+import { findPlaces, findPlacesAlong } from "./places.js?v=11";
+import { osrmTable } from "./routing.js?v=11";
+import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing } from "./midpoint.js?v=11";
+import { MidpointMap } from "./map.js?v=11";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=11";
 
 const RADIUS_M = 800;            // per-anchor POI search radius
-const MAX_CANDIDATES = 20;       // cap before OSRM call
-const MAX_RESULTS = 12;          // how many to render
+const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
+const MAX_RESULTS = 10;          // how many to render
 const DEBOUNCE_MS = 350;
 const DEFAULT_CATEGORIES = ["cafe", "restaurant", "bar"];
 const SUGGEST_MIN_CHARS = 2;
