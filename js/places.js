@@ -119,22 +119,22 @@ function makeKey(mid, categories, radiusM) {
 
 const PHOTON_ENDPOINT = "https://photon.komoot.io/api/";
 
-// Map our app categories to OSM tags. Photon matches against `osm_key` and
-// `osm_value`, with optional filters in the URL.
+// Map our app categories to OSM tags. Photon's filter syntax uses
+// `osm_tag=KEY:VALUE` (with a colon separating key from value), e.g.
+// `osm_tag=amenity:cafe`. Multiple osm_tag params are AND-combined.
 const CATEGORY_OSM = {
-  cafe:       { osm: ["amenity=cafe"] },
-  restaurant: { osm: ["amenity=restaurant", "amenity=fast_food", "amenity=food_court"] },
-  bar:        { osm: ["amenity=bar", "amenity=pub", "amenity=biergarten"] },
-  park:       { osm: ["leisure=park", "leisure=garden", "leisure=plaza"] },
-  generic:    { osm: [] },
+  cafe:       ["amenity:cafe"],
+  restaurant: ["amenity:restaurant", "amenity:fast_food", "amenity:food_court"],
+  bar:        ["amenity:bar", "amenity:pub", "amenity:biergarten"],
+  park:       ["leisure:park", "leisure:garden", "leisure:plaza"],
+  generic:    [],
 };
 
 function photonFilters(categories) {
-  // Build a flat list of "key=value" filters from the selected categories.
   const seen = new Set();
   const out = [];
   for (const c of categories) {
-    for (const kv of (CATEGORY_OSM[c]?.osm || CATEGORY_OSM.generic.osm)) {
+    for (const kv of (CATEGORY_OSM[c] || CATEGORY_OSM.generic)) {
       if (!seen.has(kv)) { seen.add(kv); out.push(kv); }
     }
   }
