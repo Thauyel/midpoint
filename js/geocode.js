@@ -206,15 +206,25 @@ async function photonGeocode(query, limit, signal) {
         const bits = [props.name, props.street, props.city || props.town || props.village, props.state, props.country]
           .filter(Boolean);
         const country = (props.country || "").toLowerCase();
-        const city = (props.city || props.town || props.village || props.state || "").toLowerCase();
+        const city = (props.city || props.town || props.village || "").toLowerCase();
         const state = (props.state || "").toLowerCase();
-        // Heuristic: major Turkish cities get a big boost. Photon's
-        // osm_importance is 0 for all of them, so we have to rank by
-        // something else. We normalize Turkish dotted-İ (İ -> i)
-        // before comparison because JS's toLowerCase() doesn't fold it.
+        // Major-place detection. We use TWO signals:
+        //   1. The place's `city` or `state` field matches a major city
+        //      name (Istanbul, Ankara, etc.) -- after norm().
+        //   2. The OSM `osm_value` is "city" or "town" (vs "village",
+        //      "hamlet", "suburb"). Major Turkish municipalities are
+        //      tagged this way; small named villages are not.
         const norm = (s) => s.replace(/İ/g, "i").replace(/ı/g, "i").toLowerCase();
         const major = ["istanbul", "ankara", "izmir", "bursa", "antalya", "adana", "konya"];
-        const isMajor = major.some((m) => norm(city).includes(m) || norm(state).includes(m));
+        const osmValue = (props.osm_value || "").toLowerCase();
+        const isMajor =
+          major.includes(norm(city)) ||
+          major.includes(norm(state)) ||
+          (osmValue === "city" || osmValue === "town" || osmValue === "suburb");
+        // `_osmBig` is a stronger signal: the OSM place is tagged as a
+        // city/town/suburb, not a village/hamlet. Major Turkish
+        // municipalities always carry this tag.
+        const _osmBig = osmValue === "city" || osmValue === "town";
         return {
           lat: typeof lat === "number" ? lat : parseFloat(lat),
           lon: typeof lon === "number" ? lon : parseFloat(lon),
@@ -236,13 +246,16 @@ async function photonGeocode(query, limit, signal) {
     return enriched
       .filter((r) => !preferTurkey || r._turkey || r.importance > 0.85)
       .sort((a, b) => {
-        // Major Turkish cities first
-        if (preferTurkey && a._major !== b._major) return a._major ? -1 : 1;
+        // Major Turkish cities first (one is "city"/"town" tagged,
+        // the other is "village"). Push city/town to the top.
+        const aScore = (a._major ? 10 : 0) + (a._osmBig ? 5 : 0);
+        const bScore = (b._major ? 10 : 0) + (b._osmBig ? 5 : 0);
+        if (aScore !== bScore) return bScore - aScore;
         if (preferTurkey && a._turkey !== b._turkey) return a._turkey ? -1 : 1;
         return (b.importance ?? 0) - (a.importance ?? 0);
       })
       .slice(0, limit)
-      .map(({ _turkey, _major, ...rest }) => rest);
+      .map(({ _turkey, _major, _osmBig, ...rest }) => rest);
   } catch {
     return [];
   }
