@@ -204,9 +204,18 @@ async function photonPoiSearch(mid, categories, radiusM, signal) {
         return props.osm_key === k && props.osm_value === v;
       });
       if (filters.length > 0 && !matched) continue;
+      // Hard distance filter: drop anything farther than 2x the
+      // per-anchor radius. Without this, famous-name matches in
+      // Sydney/Berlin can outrank a small cafe next door. We use 2x
+      // for headroom: the search is by lat/lon but real geography is
+      // messy and we don't want to miss a cafe just across a fjord.
+      const dlat = (lat - mid.lat) * 111000;
+      const dlon = (lon - mid.lon) * 111000 * Math.cos((mid.lat * Math.PI) / 180);
+      const distM = Math.sqrt(dlat * dlat + dlon * dlon);
+      if (distM > radiusM * 2) continue;
       const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
       if (seen.has(key)) continue;
-      seen.add(key);
+      seen.push(key);
       results.push({
         id: `photon/${props.osm_type || "n"}/${props.osm_id || key}`,
         name,
