@@ -98,3 +98,18 @@ export function rankByFairness(candidates) {
 export function isFair(c, thresholdS = 5 * 60) {
   return Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0)) <= thresholdS;
 }
+
+// Average urban driving speed (m/s). ~30 km/h is a reasonable assumption for
+// Istanbul, London, NYC, etc. We use this when OSRM is down so the app still
+// gives a ranked list instead of failing entirely.
+export const URBAN_DRIVE_M_S = 30 * 1000 / 3600; // 8.333
+
+/**
+ * Fallback ETA from straight-line distance. Used when OSRM /table is
+ * unavailable (rate-limited / CORS-blocked / timed out). Less accurate than
+ * OSRM but still good enough for fairness ranking.
+ */
+export function haversineEta(distanceM, speedMps = URBAN_DRIVE_M_S) {
+  if (distanceM == null || !isFinite(distanceM)) return null;
+  return distanceM / speedMps;
+}

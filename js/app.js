@@ -6,7 +6,7 @@
 import { geocode, reverse as reverseGeocode } from "./geocode.js";
 import { findPlaces } from "./places.js";
 import { osrmTable } from "./routing.js";
-import { midpoint, rankByFairness, fmtEta, fmtDist, isFair, haversine } from "./midpoint.js";
+import { midpoint, rankByFairness, fmtEta, fmtDist, isFair, haversine, haversineEta } from "./midpoint.js";
 import { MidpointMap } from "./map.js";
 import { t, applyTranslations, getLanguage } from "./i18n.js";
 
@@ -373,18 +373,32 @@ async function runPipeline() {
       .map(({ p }) => p);
 
     setHint(t("hint.routing"), "");
-    const matrix = await osrmTable(
-      [a, b],
-      candidates.map((p) => [p.lon, p.lat])
-    );
+    let matrix;
+    let osrmOk = false;
+    try {
+      matrix = await osrmTable(
+        [a, b],
+        candidates.map((p) => [p.lon, p.lat])
+      );
+      osrmOk = !!(matrix?.durations?.[0] && matrix.durations[0].length > 0);
+    } catch (e) {
+      console.warn("OSRM unavailable, falling back to straight-line ETA:", e?.message || e);
+      matrix = null;
+    }
 
-    const enriched = candidates.map((p, i) => ({
-      ...p,
-      eta_a_s: matrix.durations[0]?.[i] ?? null,
-      eta_b_s: matrix.durations[1]?.[i] ?? null,
-      distance_a_m: matrix.distances[0]?.[i] ?? null,
-      distance_b_m: matrix.distances[1]?.[i] ?? null,
-    }));
+    const enriched = candidates.map((p, i) => {
+      // Prefer OSRM's real ETA; fall back to straight-line estimate if it failed
+      // or returned null/undefined for this candidate.
+      const eta_a_s = matrix?.durations?.[0]?.[i] ?? haversineEta(haversine(a, p));
+      const eta_b_s = matrix?.durations?.[1]?.[i] ?? haversineEta(haversine(b, p));
+      return {
+        ...p,
+        eta_a_s,
+        eta_b_s,
+        distance_a_m: matrix?.distances?.[0]?.[i] ?? haversine(a, p),
+        distance_b_m: matrix?.distances?.[1]?.[i] ?? haversine(b, p),
+      };
+    });
 
     const ranked = rankByFairness(enriched).slice(0, 10);
     state.results = ranked;

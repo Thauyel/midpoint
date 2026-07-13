@@ -67,9 +67,12 @@ export async function osrmTable(sources, destinations, { signal } = {}) {
   const promise = (async () => {
     // OSRM's URL parser is fragile — it requires the coords inline in the path
     // (not URL-encoded) and only uses `?` for sources/destinations/annotations.
+    // We always request sources=0;1 explicitly and destinations=all (returns
+    // one row per source containing all-pair durations). Using `all` makes
+    // the URL parser-friendly across OSRM versions.
     const params = new URLSearchParams();
-    params.set("sources", srcIdx);
-    params.set("destinations", dstIdx);
+    params.set("sources", "0;1");
+    params.set("destinations", "all");
     params.set("annotations", "duration,distance");
     const url = `${ENDPOINT}/${allCoords}?${params}`;
 
