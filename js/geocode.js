@@ -207,12 +207,13 @@ async function photonGeocode(query, limit, signal) {
           .filter(Boolean);
         const country = (props.country || "").toLowerCase();
         const city = props.city || props.town || props.village || props.state || "";
+        const state = props.state || "";
         // Heuristic: major Turkish cities get a big boost. Photon's
         // osm_importance is 0 for all of them, so we have to rank by
         // something else. This isn't perfect but it puts İstanbul /
         // Ankara / İzmir at the top for any "X, Istanbul"-style match.
         const major = ["istanbul", "ankara", "izmir", "bursa", "antalya", "adana", "konya"];
-        const isMajor = major.some((m) => city.toLowerCase().includes(m));
+        const isMajor = major.some((m) => city.toLowerCase().includes(m) || state.toLowerCase().includes(m));
         return {
           lat: typeof lat === "number" ? lat : parseFloat(lat),
           lon: typeof lon === "number" ? lon : parseFloat(lon),

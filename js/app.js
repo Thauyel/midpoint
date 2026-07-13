@@ -3,12 +3,12 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=19";
-import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=19";
-import { osrmTable } from "./routing.js?v=19";
-import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=19";
-import { MidpointMap } from "./map.js?v=19";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=19";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=20";
+import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=20";
+import { osrmTable } from "./routing.js?v=20";
+import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=20";
+import { MidpointMap } from "./map.js?v=20";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=20";
 
 const RADIUS_M = 800;            // per-anchor POI search radius
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
