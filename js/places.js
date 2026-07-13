@@ -576,22 +576,27 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
  * the line search has had a chance.
  */
 export async function findPlacesAlways(initialAnchors, categories, mid, {
-  signal, minResults = 5, startRadiusM = 1500, stepM = 1500, maxSteps = 6,
+  signal, minResults = 5, startRadiusM = 1500, stepM = 1500, maxRadiusM = 9000,
 } = {}) {
-  // First pass: the smart anchor set.
+  // First pass: the smart anchor set with the (length-aware) base radius.
   let places = await findPlacesAlong(initialAnchors, categories, startRadiusM, { signal });
   if (places.length >= minResults) return places;
 
   // Second pass: anchor set is just the midpoint, with expanding radius.
-  // This is the brute-force "guarantee suggestions" path.
-  for (let i = 0; i < maxSteps; i++) {
+  // We step `stepM` metres at a time up to `maxRadiusM`. The caller passes
+  // stepM + maxRadiusM scaled to the input's geographic scale -- for a
+  // 50km Beylikdüzü↔Kartal input that means 5km steps up to 20km, so we
+  // absolutely cannot land in an empty zone with zero suggestions.
+  const radii = [];
+  for (let r = startRadiusM; r <= maxRadiusM; r += Math.max(stepM, 500)) {
+    radii.push(r);
+    if (radii.length >= 8) break; // safety cap
+  }
+  for (const r of radii) {
     if (signal?.aborted) break;
-    const r = startRadiusM * (1 + i);
     const anchors = [{ ...mid, _r: r }];
-    // Run a single-anchor search with this radius (no need for a pool).
     const more = await findPlacesAlong(anchors, categories, r, { signal });
     if (more.length > 0) {
-      // Dedupe and merge.
       const seen = new Set(places.map((p) => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`));
       for (const p of more) {
         const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;

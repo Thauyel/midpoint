@@ -3,14 +3,14 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=32";
-import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=32";
-import { osrmTable } from "./routing.js?v=32";
-import { midpoint, rankByFairness, rankByFairnessFirst, rankByMidpointDistance, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=32";
-import { MidpointMap } from "./map.js?v=32";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=32";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=33";
+import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=33";
+import { osrmTable } from "./routing.js?v=33";
+import { midpoint, rankByFairness, rankByFairnessFirst, rankByMidpointDistance, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=33";
+import { MidpointMap } from "./map.js?v=33";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=33";
 
-const RADIUS_M = 800;            // per-anchor POI search radius
+const RADIUS_M = 1500;           // BASE per-anchor POI search radius (overridden per-call by length-aware scaling)
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
 const MAX_RESULTS = 10;          // how many to render
 const DEBOUNCE_MS = 350;
@@ -374,19 +374,40 @@ async function runPipeline() {
     const candidateFilterM = fairRadius * 1.4;
     const anchors = buildAnchors(a, b, directM, fairRadius);
 
-    // findPlacesAlways tries the smart anchor set first; if that returns
-    // fewer than 5 places (or zero), it widens the search around the
-    // geographic midpoint with progressively larger radii until it
-    // surfaces suggestions. Guarantees we never show an empty list
-    // unless every external API is down.
+    // Length-aware per-anchor radius: each line/corridor anchor must reach
+    // far enough that adjacent anchors OVERLAP, otherwise we leave gaps in
+    // the corridor. The required reach is `directM / lineSamples` -- equal
+    // to the gap between adjacent samples, so each circle reaches into its
+    // neighbour. For Beylikdüzü↔Kartal (50km, 7 samples) that's ~6700m,
+    // vs the old hard-coded 800m which made whole stretches of corridor
+    // appear empty. The 2x Photon distance filter on top still trims hits
+    // that drift outside the immediate circle.
+    const lineSamplesN = directM < 15000 ? 5 : 7;
+    const perAnchorM = Math.max(RADIUS_M, Math.ceil(directM / lineSamplesN));
+    // Length-aware expanding fallback cap: at minimum, the widening should
+    // cover 40% of the line so even when the strict corridor returns
+    // nothing the safety net reaches into the populated half of the city.
+    // For a 50km line that's 20km -- pretty much the whole of Istanbul.
+    const maxRadiusM = Math.max(9000, Math.ceil(directM * 0.4));
+
+    // findPlacesAlways tries the smart anchor set first with the scaled
+    // radius; if that returns fewer than 5 places (or zero), it widens
+    // the search around the geographic midpoint with progressively larger
+    // radii up to maxRadiusM, until it surfaces suggestions. Guarantees
+    // we never show an empty list unless every external API is down.
     const allPlaces = await findPlacesAlways(anchors, [...state.categories], mid, {
-      startRadiusM: RADIUS_M,
+      startRadiusM: perAnchorM,
+      stepM: Math.max(1500, Math.ceil(directM * 0.1)),
+      maxRadiusM,
       minResults: 5,
     });
 
     // Drop places whose straight-line distance from BOTH endpoints exceeds
     // candidateFilterM -- those would never be fair no matter what traffic
     // does. This is a hard pre-filter before the expensive OSRM call.
+    // Note: candidateFilterM is the FAIR ZONE × 1.4, which grows with line
+    // length (e.g. 35km for Beylikdüzü↔Kartal at 50km) so this is generous
+    // enough that the user's guarantee ("always suggest something") holds.
     let candidates = allPlaces
       .filter((p) => haversine(a, p) <= candidateFilterM && haversine(b, p) <= candidateFilterM)
       .slice(0, MAX_CANDIDATES);
@@ -487,10 +508,15 @@ function buildAnchors(a, b, directM, fairRadius) {
     out.push(p);
     // For longer distances, also sample off the line in case the straight
     // line passes through a sea/mountain but cafes live on the coast nearby.
+    // The corridor reach must also grow with directM, otherwise for very
+    // long lines the perpendicular sampling misses whole districts.
     if (directM >= 5000) {
       const brg = bearing(a, b);
-      out.push(offsetPoint(p,  Math.min(800, fairRadius * 0.5), brg + 90));
-      out.push(offsetPoint(p, -Math.min(800, fairRadius * 0.5), brg + 90));
+      // Corridor offset = 1/4 of the line length, capped so it stays
+      // reasonable. For 50km line that's 12.5km -- covers a wide swath.
+      const corridorOffset = Math.min(20000, Math.max(800, Math.ceil(directM * 0.25)));
+      out.push(offsetPoint(p,  corridorOffset, brg + 90));
+      out.push(offsetPoint(p, -corridorOffset, brg + 90));
     }
   }
 
