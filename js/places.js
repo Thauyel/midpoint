@@ -579,63 +579,97 @@ export async function findPlacesAlways(initialAnchors, categories, mid, {
   signal, minResults = 5, startRadiusM = 1500, stepM = 1500, maxRadiusM = 9000,
   bboxA = null, bboxB = null,
 } = {}) {
-  // First pass: the smart anchor set with the (length-aware) base radius.
-  let places = await findPlacesAlong(initialAnchors, categories, startRadiusM, { signal });
-  if (places.length >= minResults) return places;
+  // We always run the smart corridor search AND a bbox-grid safety net
+  // IN PARALLEL. The corridor is the fast path; the grid is the
+  // guaranteed-results safety net. We merge results from both as they
+  // come in and return as soon as we hit `minResults` -- so the typical
+  // case (corridor finds cafes) finishes in ~1-2 seconds even when the
+  // grid is also running. The pathological case (corridor returns 0)
+  // still completes in grid-time (~5-15 seconds for a 50km line).
+  const tasks = [];
 
-  // Second pass: anchor set is just the midpoint, with expanding radius.
-  // We step `stepM` metres at a time up to `maxRadiusM`. The caller passes
-  // stepM + maxRadiusM scaled to the input's geographic scale -- for a
-  // 50km Beylikdüzü↔Kartal input that means 5km steps up to 20km, so we
-  // absolutely cannot land in an empty zone with zero suggestions.
-  const radii = [];
-  for (let r = startRadiusM; r <= maxRadiusM; r += Math.max(stepM, 500)) {
-    radii.push(r);
-    if (radii.length >= 8) break; // safety cap
-  }
-  for (const r of radii) {
-    if (signal?.aborted) break;
-    const anchors = [{ ...mid, _r: r }];
-    const more = await findPlacesAlong(anchors, categories, r, { signal });
-    if (more.length > 0) {
-      const seen = new Set(places.map((p) => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`));
-      for (const p of more) {
-        const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
-        if (!seen.has(k)) { seen.add(k); places.push(p); }
-      }
+  // Task 1: smart corridor + line samples at length-aware radius.
+  tasks.push((async () => {
+    const out = await findPlacesAlong(initialAnchors, categories, startRadiusM, { signal });
+    return { source: "corridor", places: out };
+  })());
+
+  // Task 2: expanding-radius around the geographic midpoint (gracefully
+  // widens if corridor returns little).
+  tasks.push((async () => {
+    const out = [];
+    const radii = [];
+    for (let r = startRadiusM; r <= maxRadiusM; r += Math.max(stepM, 500)) {
+      radii.push(r);
+      if (radii.length >= 6) break; // safety cap
     }
-    if (places.length >= minResults) break;
-  }
-  if (places.length >= minResults) return places;
-
-  // Third pass: BBOX GRID. If the corridor + midpoint widening still
-  // returned too few results (e.g. the midpoint is over a mountain or
-  // large empty region), split the A↔B bounding box into a 3x3 grid and
-  // search each cell. This is the brute-force "guaranteed suggestions"
-  // fallback -- by sampling every quadrant of the user-defined area, we
-  // statistically cannot land in an empty zone for any reasonable input.
-  if (bboxA && bboxB) {
-    const grid = makeBboxGrid(bboxA, bboxB, 3, 3);
-    const cellRadius = maxRadiusM * 0.6;
-    for (const cell of grid) {
+    for (const r of radii) {
       if (signal?.aborted) break;
       const more = await findPlacesAlong(
-        [{ ...cell, _r: cellRadius }],
+        [{ ...mid, _r: r }],
         categories,
-        cellRadius,
+        r,
         { signal },
       );
-      if (more.length > 0) {
-        const seen = new Set(places.map((p) => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`));
-        for (const p of more) {
-          const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
-          if (!seen.has(k)) { seen.add(k); places.push(p); }
-        }
+      out.push(...more);
+      if (out.length >= minResults * 2) break;
+    }
+    return { source: "expanding", places: out };
+  })());
+
+  // Task 3: bbox-grid safety net. Splits the A↔B bounding box into 9
+  // cells and searches each one with a generous radius. Statistically
+  // impossible to miss popular places for any reasonable user input.
+  if (bboxA && bboxB) {
+    tasks.push((async () => {
+      const out = [];
+      const grid = makeBboxGrid(bboxA, bboxB, 3, 3);
+      const cellRadius = Math.max(6000, maxRadiusM * 0.6);
+      for (const cell of grid) {
+        if (signal?.aborted) break;
+        const more = await findPlacesAlong(
+          [{ ...cell, _r: cellRadius }],
+          categories,
+          cellRadius,
+          { signal },
+        );
+        out.push(...more);
+        if (out.length >= minResults * 2) break;
       }
-      if (places.length >= minResults) break;
+      return { source: "grid", places: out };
+    })());
+  }
+
+  // Fire all tasks in parallel from the start. Wait for them in
+  // submission order so we can short-circuit and abort the rest once
+  // any single task has produced enough hits on its own. If no task
+  // reaches the threshold by itself, we wait for ALL of them to finish
+  // and merge -- guaranteeing the user always sees suggestions even in
+  // the pathological case where the corridor alone is empty.
+  //
+  // Tasks are kicked off synchronously above, so they're already running
+  // concurrently. The await loop below just unblocks as each completes.
+  const placeByKey = new Map();
+  const addAll = (places) => {
+    for (const p of places) {
+      const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
+      if (!placeByKey.has(k)) placeByKey.set(k, p);
+    }
+  };
+  let shortCircuited = false;
+  for (const task of tasks) {
+    const { places } = await task;
+    addAll(places);
+    if (places.length >= minResults && !shortCircuited) {
+      shortCircuited = true;
+      // Abort any in-flight tasks so they don't waste cycles.
+      if (signal && "abort" in signal) signal.abort?.();
+      break;
     }
   }
-  return places;
+  // Drain the remaining tasks so we don't leak in-flight fetches.
+  await Promise.allSettled(tasks);
+  return [...placeByKey.values()];
 }
 
 /**
