@@ -227,6 +227,10 @@ function updateFindBtn() {
   els.findBtn.disabled = !ready;
   els.findBtn.classList.toggle("is-loading", state.finding);
 
+  // If we just rendered results, keep the "done" hint visible -- otherwise
+  // calling updateFindBtn() in finally{} would clobber it back to "ready".
+  if (state.results.length > 0 && !state.finding) return;
+
   if (state.finding) {
     setHint(t("hint.places"), "");
   } else if (!state.sides.a.point && !state.sides.b.point) {
