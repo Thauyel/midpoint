@@ -26,13 +26,22 @@ const BROWSER_HEADERS = {
 };
 
 const ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
+  // kumi.systems is the most reliable from browser contexts (CORS-friendly
+  // and forwards to the main Overpass cluster). We try it first.
   "https://overpass.kumi.systems/api/interpreter",
+  // api.de is the canonical but enforces CORS strictly on POST from browser
+  // origins other than openstreetmap.org, so it usually fails from Vercel.
+  "https://overpass-api.de/api/interpreter",
+  // osm.ch has a stale DB (timestamp often weeks old) and is the last resort.
   "https://overpass.osm.ch/api/interpreter",
 ];
 
 const MAX_ATTEMPTS = 2;
-const BASE_BACKOFF_MS = 800;
+const BASE_BACKOFF_MS = 600;
+// Per-endpoint hard timeout (ms). The public Overpass mirrors are sometimes
+// pathologically slow (30s+ before any response) -- we'd rather fail fast
+// and try the next mirror.
+const ENDPOINT_TIMEOUT_MS = 8000;
 
 const cache = new Map();
 const inflight = new Map();
@@ -114,6 +123,11 @@ export async function findPlaces(mid, categories, radiusM = 2000, { signal } = {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       for (const endpoint of ENDPOINTS) {
+        // Compose an AbortController so a slow mirror doesn't make us wait
+        // 30+ seconds before trying the next one.
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), ENDPOINT_TIMEOUT_MS);
+        if (signal) signal.addEventListener("abort", () => ctl.abort(), { once: true });
         try {
           const res = await fetch(endpoint, {
             method: "POST",
@@ -122,8 +136,9 @@ export async function findPlaces(mid, categories, radiusM = 2000, { signal } = {
               ...BROWSER_HEADERS,
             },
             body: "data=" + encodeURIComponent(query),
-            signal,
+            signal: ctl.signal,
           });
+          clearTimeout(timer);
           if (res.status === 429 || res.status === 504) {
             lastErr = makeError("OVERPASS_FAILED", `${res.status} from ${endpoint}`);
             continue; // try next endpoint
@@ -134,11 +149,23 @@ export async function findPlaces(mid, categories, radiusM = 2000, { signal } = {
           }
           const data = await res.json();
           const out = parseOverpass(data, categories);
+          // An empty result isn't necessarily a failure of THIS endpoint, but
+          // if all three mirrors return empty then we know the area has
+          // nothing in OSM (rare in cities). Surface that so the caller can
+          // try the Nominatim fallback.
           cache.set(key, out);
           return out;
         } catch (e) {
-          if (e?.name === "AbortError") throw e;
-          lastErr = makeError("NETWORK", e?.message || "fetch failed");
+          clearTimeout(timer);
+          // If the caller aborted, propagate immediately.
+          if (signal?.aborted) throw makeError("ABORTED", "caller aborted");
+          // Otherwise it's a per-endpoint problem (timeout, CORS, network) —
+          // record it and let the loop try the next mirror.
+          if (e?.name === "AbortError") {
+            lastErr = makeError("OVERPASS_FAILED", `timeout ${endpoint}`);
+          } else {
+            lastErr = makeError("NETWORK", e?.message || "fetch failed");
+          }
         }
       }
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
