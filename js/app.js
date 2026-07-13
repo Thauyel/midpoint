@@ -6,13 +6,16 @@
 import { geocode, reverse as reverseGeocode } from "./geocode.js";
 import { findPlaces } from "./places.js";
 import { osrmTable } from "./routing.js";
-import { midpoint, rankByFairness, fmtEta, fmtDist, isFair } from "./midpoint.js";
+import { midpoint, rankByFairness, fmtEta, fmtDist, isFair, haversine } from "./midpoint.js";
 import { MidpointMap } from "./map.js";
 import { t, applyTranslations, getLanguage } from "./i18n.js";
 
-const RADIUS_M = 2000;
+const RADIUS_M = 1500;
 const DEBOUNCE_MS = 350;
 const DEFAULT_CATEGORIES = ["cafe", "restaurant", "bar"];
+// OSRM demo is heavily rate-limited; 12 candidates + 2 sources = 14 coords,
+// small enough to fly through the public demo in a couple of seconds.
+const MAX_CANDIDATES = 12;
 const SUGGEST_MIN_CHARS = 2;
 
 // ----- state -----
@@ -350,19 +353,28 @@ async function runPipeline() {
 
   try {
     setHint(t("hint.places"), "");
-    const places = await findPlaces(mid, [...state.categories], RADIUS_M);
-    if (places.length === 0) {
+    const allPlaces = await findPlaces(mid, [...state.categories], RADIUS_M);
+    if (allPlaces.length === 0) {
       setHint(t("hint.no_places"), "warn");
       return;
     }
 
+    // Cap and prioritize: keep the N closest-by-haversine candidates so the
+    // OSRM /table call stays small (critical: public demo throttles big
+    // matrices hard).
+    const candidates = allPlaces
+      .map((p) => ({ p, d: haversine(mid, p) }))
+      .sort((x, y) => x.d - y.d)
+      .slice(0, MAX_CANDIDATES)
+      .map(({ p }) => p);
+
     setHint(t("hint.routing"), "");
     const matrix = await osrmTable(
       [a, b],
-      places.map((p) => [p.lon, p.lat])
+      candidates.map((p) => [p.lon, p.lat])
     );
 
-    const enriched = places.map((p, i) => ({
+    const enriched = candidates.map((p, i) => ({
       ...p,
       eta_a_s: matrix.durations[0]?.[i] ?? null,
       eta_b_s: matrix.durations[1]?.[i] ?? null,

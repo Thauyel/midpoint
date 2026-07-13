@@ -10,3 +10,7 @@ node_modules/
 Thumbs.db
 *.swp
 *.swo
+
+# local test artifacts — never deploy
+/tests/live_test.py
+/tests/*.log
