@@ -9,6 +9,7 @@
 // ============================================================
 
 const ENDPOINT = "https://nominatim.openstreetmap.org/search";
+const PHOTON_GEOCODE = "https://photon.komoot.io/api/";
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 900;
 const SUGGEST_LIMIT = 6;
@@ -50,64 +51,34 @@ export async function geocode(query, { signal, limit = SUGGEST_LIMIT } = {}) {
   if (inflight.has(key)) return inflight.get(key);
 
   const promise = (async () => {
-    let lastErr = null;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        const url = new URL(ENDPOINT);
-        url.searchParams.set("q", query);
-        url.searchParams.set("format", "jsonv2");
-        url.searchParams.set("limit", String(limit));
-        url.searchParams.set("addressdetails", "0");
-        url.searchParams.set("dedupe", "1");
-
-        const res = await fetch(url, {
-          method: "GET",
-          headers: HEADERS,
-          signal,
-        });
-
-        if (res.status === 429) {
-          lastErr = makeError("RATE_LIMITED", `429 on attempt ${attempt}`);
-          await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
-          continue;
-        }
-        if (res.status >= 500) {
-          lastErr = makeError("NETWORK", `${res.status} on attempt ${attempt}`);
-          await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
-          continue;
-        }
-        if (!res.ok) {
-          throw makeError("NETWORK", `HTTP ${res.status}`);
-        }
-
-        const data = await res.json();
-        if (!Array.isArray(data) || data.length === 0) {
-          throw makeError("ZERO_RESULTS", `no results for "${query}"`);
-        }
-
-        const results = data
-          .map((hit) => ({
-            lat: parseFloat(hit.lat),
-            lon: parseFloat(hit.lon),
-            display_name: hit.display_name,
-            type: hit.type || hit.category || "",
-            importance: typeof hit.importance === "number" ? hit.importance : 0,
-          }))
-          .filter((r) => isFinite(r.lat) && isFinite(r.lon));
-
-        if (results.length === 0) {
-          throw makeError("ZERO_RESULTS", `no valid coords for "${query}"`);
-        }
-        cache.set(key, results);
-        return results;
-      } catch (e) {
-        if (e?.name === "AbortError") throw e;
-        if (e?.code) throw e; // our own — bail
-        lastErr = makeError("NETWORK", e?.message || "fetch failed");
-        await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
-      }
+    // Photon first -- CORS-friendly, no rate limit, fast. If it returns
+    // nothing, fall back to Nominatim.
+    let data = await photonGeocode(query, limit, signal);
+    if (!Array.isArray(data) || data.length === 0) {
+      data = await nominatimGeocode(query, limit, signal);
     }
-    throw lastErr ?? makeError("NETWORK", "geocode failed");
+    if (!Array.isArray(data) || data.length === 0) {
+      throw makeError("ZERO_RESULTS", `no results for "${query}"`);
+    }
+
+    const results = data
+      .map((hit) => ({
+        lat: typeof hit.lat === "number" ? hit.lat : parseFloat(hit.lat),
+        lon: typeof hit.lon === "number" ? hit.lon : parseFloat(hit.lon),
+        display_name: hit.display_name,
+        type: hit.type,
+        importance: typeof hit.importance === "number" ? hit.importance : 0,
+      }))
+      .filter((r) => isFinite(r.lat) && isFinite(r.lon))
+      .sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0))
+      .slice(0, limit);
+
+    if (results.length === 0) {
+      throw makeError("ZERO_RESULTS", `no usable results for "${query}"`);
+    }
+
+    cache.set(key, results);
+    return results;
   })();
 
   inflight.set(key, promise);
@@ -134,6 +105,31 @@ export async function reverse(lat, lon, { signal } = {}) {
   const key = `rev:${lat.toFixed(5)},${lon.toFixed(5)}`;
   if (cache.has(key)) return cache.get(key);
 
+  // Try Photon first (no rate limit). Falls back to Nominatim on failure.
+  const photonUrl = new URL(PHOTON_GEOCODE);
+  photonUrl.searchParams.set("lat", String(lat));
+  photonUrl.searchParams.set("lon", String(lon));
+  photonUrl.searchParams.set("limit", "1");
+  try {
+    const res = await fetch(photonUrl, {
+      headers: { "Accept": "application/json" },
+      signal,
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const feat = data?.features?.[0];
+      const props = feat?.properties || {};
+      const bits = [props.name, props.street, props.city || props.town || props.village, props.state, props.country].filter(Boolean);
+      const display_name = bits.join(", ") || props.name || `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+      if (feat) {
+        const result = { lat, lon, display_name };
+        cache.set(key, result);
+        return result;
+      }
+    }
+  } catch { /* fall through to Nominatim */ }
+
+  // Nominatim fallback for reverse.
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const url = new URL("https://nominatim.openstreetmap.org/reverse");
@@ -171,4 +167,85 @@ function makeError(code, message) {
   const e = new Error(message);
   e.code = code;
   return e;
+}
+
+// ============================================================
+//  Photon geocoder (https://photon.komoot.io)
+// ============================================================
+//
+// Photon returns GeoJSON FeatureCollection where each feature has:
+//   properties: { osm_key, osm_value, name, city, country, ... }
+//   geometry.coordinates: [lon, lat]
+//
+// We map these to the same shape as Nominatim results so the rest of
+// the geocode() function is agnostic to which backend served it.
+
+async function photonGeocode(query, limit, signal) {
+  const url = new URL(PHOTON_GEOCODE);
+  url.searchParams.set("q", query);
+  url.searchParams.set("limit", String(Math.min(limit * 2, 10)));
+  try {
+    const res = await fetch(url, {
+      headers: { "Accept": "application/json" },
+      signal,
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const features = Array.isArray(data?.features) ? data.features : [];
+    return features
+      .map((f) => {
+        const [lon, lat] = f.geometry?.coordinates || [];
+        const props = f.properties || {};
+        // Build a display_name similar to Nominatim's
+        const bits = [props.name, props.street, props.city || props.town || props.village, props.state, props.country]
+          .filter(Boolean);
+        return {
+          lat: typeof lat === "number" ? lat : parseFloat(lat),
+          lon: typeof lon === "number" ? lon : parseFloat(lon),
+          display_name: bits.join(", ") || props.name || query,
+          type: props.osm_value || props.type || "",
+          importance: typeof props.osm_importance === "number" ? props.osm_importance : 0.5,
+        };
+      })
+      .filter((r) => isFinite(r.lat) && isFinite(r.lon));
+  } catch {
+    return [];
+  }
+}
+
+async function nominatimGeocode(query, limit, signal) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const url = new URL(ENDPOINT);
+      url.searchParams.set("q", query);
+      url.searchParams.set("format", "jsonv2");
+      url.searchParams.set("limit", String(limit));
+      url.searchParams.set("addressdetails", "0");
+      url.searchParams.set("dedupe", "1");
+      const res = await fetch(url, {
+        method: "GET",
+        headers: HEADERS,
+        signal,
+      });
+      if (res.status === 429) {
+        lastErr = makeError("RATE_LIMITED", `429 on attempt ${attempt}`);
+        await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+        continue;
+      }
+      if (!res.ok) {
+        lastErr = makeError("NETWORK", `HTTP ${res.status}`);
+        await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+        continue;
+      }
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
+    } catch (e) {
+      if (e?.name === "AbortError") throw e;
+      lastErr = makeError("NETWORK", e?.message || "fetch failed");
+      await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+    }
+  }
+  // Return empty on exhaustion so the caller can decide what to do
+  return [];
 }
