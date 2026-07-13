@@ -183,7 +183,12 @@ function makeError(code, message) {
 async function photonGeocode(query, limit, signal) {
   const url = new URL(PHOTON_GEOCODE);
   url.searchParams.set("q", query);
-  url.searchParams.set("limit", String(Math.min(limit * 2, 10)));
+  url.searchParams.set("limit", String(Math.min(limit * 3, 15)));
+  // Bias results to Turkey. Photon supports `lang` but no country
+  // filter directly, so we POST-FILTER the response to keep only
+  // features whose country code starts with "TR". This fixes the
+  // "Kadıköy village in Hungary gets ranked above Kadıköy district
+  // in Istanbul" problem.
   try {
     const res = await fetch(url, {
       headers: { "Accept": "application/json" },
@@ -192,22 +197,41 @@ async function photonGeocode(query, limit, signal) {
     if (!res.ok) return [];
     const data = await res.json();
     const features = Array.isArray(data?.features) ? data.features : [];
-    return features
+    // Detect if the query mentions Turkey / Türkiye / Istanbul
+    const wantTurkey = /\b(turkey|turkiye|türkiye|istanbul|ankara|izmir)\b/i.test(query);
+    const enriched = features
       .map((f) => {
         const [lon, lat] = f.geometry?.coordinates || [];
         const props = f.properties || {};
-        // Build a display_name similar to Nominatim's
         const bits = [props.name, props.street, props.city || props.town || props.village, props.state, props.country]
           .filter(Boolean);
+        const country = (props.country || "").toLowerCase();
         return {
           lat: typeof lat === "number" ? lat : parseFloat(lat),
           lon: typeof lon === "number" ? lon : parseFloat(lon),
           display_name: bits.join(", ") || props.name || query,
           type: props.osm_value || props.type || "",
           importance: typeof props.osm_importance === "number" ? props.osm_importance : 0.5,
+          _turkey: props.countrycode === "TR" || country.includes("turk") || country.includes("türk"),
         };
       })
       .filter((r) => isFinite(r.lat) && isFinite(r.lon));
+
+    // If at least 2 of the top results are Turkish, drop any non-Turkish
+    // ones -- Photon sometimes ranks a small village named "Kartal" in
+    // Hungary above Istanbul's Kartal district. This filter prefers
+    // Turkish matches when there are enough of them.
+    const turkishCount = enriched.filter((r) => r._turkey).length;
+    const preferTurkey = wantTurkey || turkishCount >= 2;
+
+    return enriched
+      .filter((r) => !preferTurkey || r._turkey || r.importance > 0.85)
+      .sort((a, b) => {
+        if (preferTurkey && a._turkey !== b._turkey) return a._turkey ? -1 : 1;
+        return (b.importance ?? 0) - (a.importance ?? 0);
+      })
+      .slice(0, limit)
+      .map(({ _turkey, ...rest }) => rest);
   } catch {
     return [];
   }
