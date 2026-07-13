@@ -108,18 +108,111 @@ function makeKey(mid, categories, radiusM) {
   return `${lat},${lon}|${[...categories].sort().join(",")}|${radiusM}`;
 }
 
-// ---------- Nominatim fallback (POI search) ----------
+// ---------- Photon POI search (primary) ----------
 //
-// Overpass's public mirrors are unreliable from browser contexts (CORS-
-// blocking on api.de, slow on kumi, stale on osm.ch). When all of them fail
-// or return zero results, we fall back to Nominatim's regular search with
-// `viewbox` + `bounded=1`. Nominatim is CORS-friendly everywhere and has
-// decent POI coverage for cafes/restaurants in cities.
+// Photon (https://photon.komoot.io) is Komoot's open-source geocoder built
+// on OpenStreetMap data. It is CORS-friendly, has no rate limit, and is
+// much faster than Nominatim. Used as the primary multi-anchor POI source.
+//
+// Returns GeoJSON FeatureCollection. Each feature has properties.osm_key,
+// properties.osm_value, properties.name, and geometry.coordinates [lon, lat].
+
+const PHOTON_ENDPOINT = "https://photon.komoot.io/api/";
+
+// Map our app categories to OSM tags. Photon matches against `osm_key` and
+// `osm_value`, with optional filters in the URL.
+const CATEGORY_OSM = {
+  cafe:       { osm: ["amenity=cafe"] },
+  restaurant: { osm: ["amenity=restaurant", "amenity=fast_food", "amenity=food_court"] },
+  bar:        { osm: ["amenity=bar", "amenity=pub", "amenity=biergarten"] },
+  park:       { osm: ["leisure=park", "leisure=garden", "leisure=plaza"] },
+  generic:    { osm: [] },
+};
+
+function photonFilters(categories) {
+  // Build a flat list of "key=value" filters from the selected categories.
+  const seen = new Set();
+  const out = [];
+  for (const c of categories) {
+    for (const kv of (CATEGORY_OSM[c]?.osm || CATEGORY_OSM.generic.osm)) {
+      if (!seen.has(kv)) { seen.add(kv); out.push(kv); }
+    }
+  }
+  return out;
+}
+
+function inferCategoryFromPhoton(hit, requested) {
+  const props = hit.properties || {};
+  const key = props.osm_key;
+  const value = props.osm_value;
+  if (key === "amenity" && value === "cafe") return "cafe";
+  if (key === "amenity" && (value === "restaurant" || value === "fast_food" || value === "food_court")) return "restaurant";
+  if (key === "amenity" && (value === "bar" || value === "pub" || value === "biergarten")) return "bar";
+  if (key === "leisure" && (value === "park" || value === "garden" || value === "plaza")) return "park";
+  for (const c of requested) if (c === "cafe" || c === "restaurant" || c === "bar" || c === "park") return c;
+  return requested[0] || "generic";
+}
+
+async function photonPoiSearch(mid, categories, radiusM, signal) {
+  const filters = photonFilters(categories);
+  // Photon uses lat/lon + a "zoom"-like distance, not a radius. We use
+  // `location_bias_scale=2&zoom=15` to bias results near the point with
+  // ~1km precision (zoom 15 = city-block scale). The `lang` defaults to
+  // local; we don't set it so the API uses its own heuristic.
+  const url = new URL(PHOTON_ENDPOINT);
+  url.searchParams.set("lat", String(mid.lat));
+  url.searchParams.set("lon", String(mid.lon));
+  // Photon's `q` is an optional text filter; we use it to bias toward the
+  // category keyword if there's a single category. With multi-category we
+  // skip the q filter and rely on `osm_tag` filters below.
+  if (categories.length === 1 && categories[0] !== "generic") {
+    url.searchParams.set("q", categories[0]);
+  }
+  // Apply OSM tag filters (limit=50 per call so we get a decent pool).
+  url.searchParams.set("limit", "30");
+  url.searchParams.set("zoom", "15");
+  for (const kv of filters) {
+    url.searchParams.set("osm_tag", kv);
+  }
+  try {
+    const res = await fetch(url, {
+      headers: { "Accept": "application/json" },
+      signal,
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const features = Array.isArray(data?.features) ? data.features : [];
+    const results = [];
+    const seen = new Set();
+    for (const f of features) {
+      const [lon, lat] = f.geometry?.coordinates || [];
+      const name = f.properties?.name;
+      if (!name || !isFinite(lat) || !isFinite(lon)) continue;
+      const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push({
+        id: `photon/${f.properties?.osm_type || "n"}/${f.properties?.osm_id || key}`,
+        name,
+        lat,
+        lon,
+        category: inferCategoryFromPhoton(f, categories),
+        tags: f.properties || {},
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Nominatim POI fallback ----------
+//
+// Photon can occasionally be down. As a last resort we fall back to
+// Nominatim with strict rate-limit-aware throttling.
 
 const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
 
-// Maps our app's category → a list of free-text queries Nominatim matches
-// against POI tags. Multiple queries give us more candidates.
 const CATEGORY_QUERIES = {
   cafe:       ["cafe", "coffee"],
   restaurant: ["restaurant", "fast food"],
@@ -140,14 +233,12 @@ function makeNominatimQueries(categories) {
 }
 
 function buildViewbox(mid, radiusM) {
-  // ~111000 m per degree of latitude. Convert radius to lon offset using cos(lat).
   const dLat = radiusM / 111000;
   const dLon = radiusM / (111000 * Math.cos((mid.lat * Math.PI) / 180));
   const left   = mid.lon - dLon;
   const right  = mid.lon + dLon;
   const top    = mid.lat + dLat;
   const bottom = mid.lat - dLat;
-  // Nominatim wants "left,top,right,bottom" (lon,lat,lon,lat).
   return `${left.toFixed(5)},${top.toFixed(5)},${right.toFixed(5)},${bottom.toFixed(5)}`;
 }
 
@@ -306,14 +397,17 @@ export async function findPlaces(mid, categories, radiusM = 2000, { signal } = {
       return overpassResults;
     }
 
-    // Overpass returned 0 hits OR every mirror failed -- fall back to
-    // Nominatim's POI search. Slower and noisier but CORS-friendly and
-    // available everywhere.
+    // Overpass returned 0 hits OR every mirror failed -- try Photon first
+    // (fast, no rate limit), then Nominatim as last resort.
     console.warn(
-      "Overpass returned no results / failed; falling back to Nominatim POI search.",
+      "Overpass returned no results / failed; trying Photon POI search.",
       lastErr?.message || ""
     );
-    const fallback = await nominatimPoiSearch(mid, categories, radiusM, signal);
+    let fallback = await photonPoiSearch(mid, categories, radiusM, signal);
+    if (fallback.length === 0) {
+      console.warn("Photon returned nothing, falling back to Nominatim.");
+      fallback = await nominatimPoiSearch(mid, categories, radiusM, signal);
+    }
     if (fallback.length > 0) {
       cache.set(key, fallback);
       return fallback;
@@ -408,7 +502,12 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), ANCHOR_TIMEOUT_MS);
     try {
-      const places = await nominatimPoiSearch(anchor, categories, radiusM, ctl.signal);
+      // Photon first -- fast and rate-limit free.
+      let places = await photonPoiSearch(anchor, categories, radiusM, ctl.signal);
+      // If Photon returns nothing, fall back to Nominatim.
+      if (places.length === 0) {
+        places = await nominatimPoiSearch(anchor, categories, radiusM, ctl.signal);
+      }
       clearTimeout(timer);
       return places;
     } catch {
