@@ -3,12 +3,12 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=16";
-import { findPlaces, findPlacesAlong } from "./places.js?v=16";
-import { osrmTable } from "./routing.js?v=16";
-import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing } from "./midpoint.js?v=16";
-import { MidpointMap } from "./map.js?v=16";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=16";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=17";
+import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=17";
+import { osrmTable } from "./routing.js?v=17";
+import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=17";
+import { MidpointMap } from "./map.js?v=17";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=17";
 
 const RADIUS_M = 800;            // per-anchor POI search radius
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
@@ -372,20 +372,34 @@ async function runPipeline() {
     const candidateFilterM = fairRadius * 1.4;
     const anchors = buildAnchors(a, b, directM, fairRadius);
 
-    const allPlaces = await findPlacesAlong(anchors, [...state.categories], RADIUS_M);
-    if (allPlaces.length === 0) {
-      setHint(t("hint.no_places"), "warn");
-      return;
-    }
+    // findPlacesAlways tries the smart anchor set first; if that returns
+    // fewer than 5 places (or zero), it widens the search around the
+    // geographic midpoint with progressively larger radii until it
+    // surfaces suggestions. Guarantees we never show an empty list
+    // unless every external API is down.
+    const allPlaces = await findPlacesAlways(anchors, [...state.categories], mid, {
+      startRadiusM: RADIUS_M,
+      minResults: 5,
+    });
 
     // Drop places whose straight-line distance from BOTH endpoints exceeds
     // candidateFilterM -- those would never be fair no matter what traffic
     // does. This is a hard pre-filter before the expensive OSRM call.
-    const candidates = allPlaces
+    let candidates = allPlaces
       .filter((p) => haversine(a, p) <= candidateFilterM && haversine(b, p) <= candidateFilterM)
       .slice(0, MAX_CANDIDATES);
 
+    // If the strict fair-zone filter dropped everything, fall back to the
+    // unfiltered set. The user wanted "somewhere further for both of them
+    // but it should still list" -- so we relax the cap rather than show
+    // zero results.
     if (candidates.length === 0) {
+      candidates = allPlaces.slice(0, MAX_CANDIDATES);
+    }
+
+    if (candidates.length === 0) {
+      // Even the expanding-radius search came up empty. Surface a clear
+      // hint that the user can try a different category.
       setHint(t("hint.no_places"), "warn");
       return;
     }
@@ -472,6 +486,17 @@ function buildAnchors(a, b, directM, fairRadius) {
       const brg = bearing(a, b);
       out.push(offsetPoint(p,  Math.min(800, fairRadius * 0.5), brg + 90));
       out.push(offsetPoint(p, -Math.min(800, fairRadius * 0.5), brg + 90));
+    }
+  }
+
+  // TANGENT CHORD: the two fair-zone circles (one around A, one around B,
+  // both radius fairRadius) have external tangent points. The line between
+  // those points -- perpendicular to A->B, offset by fairRadius -- is
+  // where places are equidistant from BOTH endpoints. Add several anchors
+  // along this chord so we don't miss genuinely fair meeting points.
+  if (directM >= 2000) {
+    for (const p of tangentChordAnchors(a, b, fairRadius, lineSamples)) {
+      out.push(p);
     }
   }
 

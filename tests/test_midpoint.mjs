@@ -18,6 +18,8 @@ import {
   bearing,
   offsetPoint,
   corridorAnchors,
+  tangentChordAnchors,
+  expandingAnchors,
 } from "../js/midpoint.js";
 
 let passed = 0;
@@ -233,6 +235,43 @@ test("corridorAnchors produces 2n points", () => {
   const b = { lat: 40.888, lon: 29.184 };
   const c = corridorAnchors(a, b, 5, 600);
   if (c.length !== 10) throw new Error(`expected 10, got ${c.length}`);
+});
+
+console.log("\n== tangent chord ==");
+
+test("tangentChordAnchors produces 4n points", () => {
+  const a = { lat: 40.992, lon: 29.025 };
+  const b = { lat: 40.888, lon: 29.184 };
+  const r = 5000;
+  const c = tangentChordAnchors(a, b, r, 5);
+  // 5 line samples × 4 points each (offset +r, offset -r, r*0.4, -r*0.4)
+  if (c.length !== 20) throw new Error(`expected 20, got ${c.length}`);
+});
+
+test("tangent chord points are equidistant from A and B", () => {
+  // For two circles of equal radius r centred at A and B, the tangent
+  // chord points sit on a line perpendicular to A→B at distance r from
+  // the line AB. They should be roughly equidistant from A and B.
+  const a = { lat: 41.0, lon: 29.0 };
+  const b = { lat: 41.0, lon: 29.1 };  // 10km east of A
+  const r = 5000;
+  const chord = tangentChordAnchors(a, b, r, 1);
+  // The offset=200 points should be roughly equidistant (small inset).
+  for (const p of chord) {
+    const dA = haversine(a, p);
+    const dB = haversine(b, p);
+    if (Math.abs(dA - dB) > 100) {
+      throw new Error(`not equidistant: dA=${dA} dB=${dB} point=${JSON.stringify(p)}`);
+    }
+  }
+});
+
+test("expandingAnchors produces N anchors with growing radius", () => {
+  const mid = { lat: 40.94, lon: 29.10 };
+  const anchors = expandingAnchors(mid, 2000, 1500, 5);
+  if (anchors.length !== 5) throw new Error(`expected 5, got ${anchors.length}`);
+  if (anchors[0]._r !== 2000) throw new Error(`first radius ${anchors[0]._r}`);
+  if (anchors[4]._r !== 8000) throw new Error(`last radius ${anchors[4]._r}`);
 });
 
 console.log("\n== haversineEta ==");

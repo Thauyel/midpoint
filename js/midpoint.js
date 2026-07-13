@@ -255,3 +255,60 @@ export function corridorAnchors(a, b, lineSamplesN = 5, perpOffsetM = 600) {
   }
   return out;
 }
+
+// ============================================================
+//  Tangent line through the two fair-zone circles
+// ============================================================
+//
+// The "fair zone" is the intersection of two circles, one around A and
+// one around B, both with radius directM * 0.5. The INTERSECTION is a
+// lens. The two EXTERNAL tangent points (where a line touches both circles
+// from the outside, on the side facing the meeting region) form a chord
+// across each circle. A line connecting those tangent points is the
+// "tangent chord" -- places on this line are equidistant from A and B
+// AND sit on the boundary of the fair zone. Catching cafes along this
+// chord is a powerful way to find genuinely fair meeting points.
+//
+// For two circles of EQUAL radius (which is our case), the external
+// tangents are simply parallel to A→B, offset perpendicularly by `r`.
+// We add a small inward offset so the line passes just inside the
+// fair zone, not exactly on its boundary.
+
+/**
+ * Build the two "tangent chord" lines: the perpendicular lines to A→B
+ * at each fair-circle's boundary, plus several sample points ALONG the
+ * chord. Returns anchors perpendicular to A→B at distance r (the fair
+ * radius) from the line, on both sides.
+ */
+export function tangentChordAnchors(a, b, r, samplesN = 5) {
+  const out = [];
+  const brg = bearing(a, b);
+  // Inset slightly so anchors land inside the fair zone, not on the
+  // boundary circle (where a search would mostly return nothing).
+  const offset = Math.max(200, r * 0.4);
+  // The chord runs perpendicular to A→B. Sample points along it.
+  // Use the line sample midpoints to get good geographic spread.
+  for (const p of sampleAlongLine(a, b, samplesN)) {
+    out.push(offsetPoint(p,  offset, brg + 90));
+    out.push(offsetPoint(p, -offset, brg + 90));
+    // Also push the boundary points themselves -- popular places that
+    // sit exactly on the fair-zone edge are still valuable.
+    out.push(offsetPoint(p,  r, brg + 90));
+    out.push(offsetPoint(p, -r, brg + 90));
+  }
+  return out;
+}
+
+/**
+ * Build a strictly "always-suggest" anchor set: progressively widens
+ * the search radius around the geographic midpoint until we get hits.
+ * Used as a last-resort fallback if the line/corridor searches return
+ * zero places. Returns the union of anchors at increasing radii.
+ */
+export function expandingAnchors(mid, startRadiusM = 2000, stepM = 2000, maxSteps = 5) {
+  const out = [];
+  for (let i = 0; i < maxSteps; i++) {
+    out.push({ ...mid, _r: startRadiusM + i * stepM });
+  }
+  return out;
+}

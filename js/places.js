@@ -489,14 +489,12 @@ export function clearCache() {
  * or their geographic midpoint falls in the sea -- we sample anchors along
  * the line A->B and search around each.
  *
- * Internally: each anchor is queried via the Nominatim POI fallback path
- * directly (not via findPlaces), because:
- *   1. Overpass is rate-limited and slow per-mirror; we don't want to
- *      hit 3 Overpass mirrors × N anchors = 30+ requests just for one find.
- *   2. The line-anchor strategy inherently needs MANY small queries,
- *      not one big Overpass query -- so Nominatim's "one request per
- *      category" pattern actually fits better.
- *   3. Nominatim has CORS-friendly access from any browser origin.
+ * Internally: each anchor is queried via the Photon geocoder (with
+ * Nominatim as fallback). See the long comment on findPlaces() above
+ * for why we don't use Overpass here.
+ *
+ * Each anchor may carry a `._r` field for a per-anchor search radius
+ * (used by expandingAnchors). Default radius is the function argument.
  *
  * Returns [{ id, name, lat, lon, category, tags }]. Never throws: errors on
  * individual anchors are swallowed and we move on.
@@ -511,14 +509,15 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
   let cursor = 0;
 
   async function processAnchor(anchor) {
+    const r = (typeof anchor._r === "number" && anchor._r > 0) ? anchor._r : radiusM;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), ANCHOR_TIMEOUT_MS);
     try {
       // Photon first -- fast and rate-limit free.
-      let places = await photonPoiSearch(anchor, categories, radiusM, ctl.signal);
+      let places = await photonPoiSearch(anchor, categories, r, ctl.signal);
       // If Photon returns nothing, fall back to Nominatim.
       if (places.length === 0) {
-        places = await nominatimPoiSearch(anchor, categories, radiusM, ctl.signal);
+        places = await nominatimPoiSearch(anchor, categories, r, ctl.signal);
       }
       clearTimeout(timer);
       return places;
@@ -548,6 +547,47 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
 
   await Promise.all(Array.from({ length: Math.min(POOL, anchors.length) }, worker));
   return all;
+}
+
+/**
+ * "Always suggest something" wrapper. Runs findPlacesAlong with the given
+ * anchor set; if it returns 0 results, retries with anchors that have a
+ * progressively larger search radius. Keeps widening until we get at
+ * least MIN_RESULTS hits OR we hit MAX_RADIUS_M. Guarantees the caller
+ * never gets an empty list (unless every photon + nominatim endpoint is
+ * down, in which case the underlying findPlacesAlong returns []).
+ *
+ * `mid` is the geographic midpoint (the place to start expanding around
+ * if the smart anchors fail). We seed the expansion with the ORIGINAL
+ * anchors at the first attempt so we don't burn cycles widening before
+ * the line search has had a chance.
+ */
+export async function findPlacesAlways(initialAnchors, categories, mid, {
+  signal, minResults = 5, startRadiusM = 1500, stepM = 1500, maxSteps = 6,
+} = {}) {
+  // First pass: the smart anchor set.
+  let places = await findPlacesAlong(initialAnchors, categories, startRadiusM, { signal });
+  if (places.length >= minResults) return places;
+
+  // Second pass: anchor set is just the midpoint, with expanding radius.
+  // This is the brute-force "guarantee suggestions" path.
+  for (let i = 0; i < maxSteps; i++) {
+    if (signal?.aborted) break;
+    const r = startRadiusM * (1 + i);
+    const anchors = [{ ...mid, _r: r }];
+    // Run a single-anchor search with this radius (no need for a pool).
+    const more = await findPlacesAlong(anchors, categories, r, { signal });
+    if (more.length > 0) {
+      // Dedupe and merge.
+      const seen = new Set(places.map((p) => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`));
+      for (const p of more) {
+        const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
+        if (!seen.has(k)) { seen.add(k); places.push(p); }
+      }
+    }
+    if (places.length >= minResults) break;
+  }
+  return places;
 }
 
 function makeError(code, message) {
