@@ -3,12 +3,12 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=31";
-import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=31";
-import { osrmTable } from "./routing.js?v=31";
-import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=31";
-import { MidpointMap } from "./map.js?v=31";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=31";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=32";
+import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=32";
+import { osrmTable } from "./routing.js?v=32";
+import { midpoint, rankByFairness, rankByFairnessFirst, rankByMidpointDistance, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=32";
+import { MidpointMap } from "./map.js?v=32";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=32";
 
 const RADIUS_M = 800;            // per-anchor POI search radius
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
@@ -26,6 +26,8 @@ const state = {
   categories: new Set(DEFAULT_CATEGORIES),
   finding: false,
   results: [],
+  allCandidates: [],   // raw fetched places with eta_a_s/eta_b_s, used for re-sorting
+  sortMode: "midpoint", // "midpoint" | "fair" | "total"
   mid: null,
 };
 
@@ -433,8 +435,11 @@ async function runPipeline() {
       };
     });
 
-    // Rank fairness-first: smallest |Δ| wins, total is the tiebreaker.
-    const ranked = rankByFairnessFirst(enriched).slice(0, MAX_RESULTS);
+    // Rank: default to "closest to midpoint" (what users actually want when
+    // they say "near the middle"). Other modes ("fair", "total") are available
+    // via the sort tabs -- toggling just re-sorts the same set, no re-fetch.
+    state.allCandidates = enriched;
+    const ranked = applySort(enriched, state.sortMode, mid).slice(0, MAX_RESULTS);
     state.results = ranked;
     renderResults(ranked);
     renderMapPlaces(ranked);
@@ -620,6 +625,42 @@ els.aboutBtn.addEventListener("click", () => {
   } else {
     alert("midpoint — " + t("about.p1"));
   }
+});
+
+// ============================================================
+//  sort tabs (closest to midpoint / most fair / min total time)
+// ============================================================
+
+/**
+ * Apply the current sort mode to the candidates. Pure function over a copy.
+ * `mid` is required for "midpoint" mode; falls back to fairness sort if
+ * somehow missing (shouldn't happen).
+ */
+function applySort(candidates, mode, mid) {
+  if (mode === "fair")   return rankByFairnessFirst(candidates);
+  if (mode === "total")  return rankByTotalDrive(candidates);
+  return rankByMidpointDistance(candidates, mid); // default
+}
+
+// Re-sort whenever a sort tab is clicked. Uses cached `allCandidates`
+// so no network round-trip.
+const sortTabs = document.querySelectorAll(".sort-tab");
+sortTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const mode = tab.dataset.sort;
+    if (!mode || mode === state.sortMode) return;
+    state.sortMode = mode;
+    sortTabs.forEach((t) => {
+      const active = t.dataset.sort === mode;
+      t.classList.toggle("is-active", active);
+      t.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    if (!state.allCandidates.length || !state.mid) return;
+    const ranked = applySort(state.allCandidates, state.sortMode, state.mid).slice(0, MAX_RESULTS);
+    state.results = ranked;
+    renderResults(ranked);
+    renderMapPlaces(ranked);
+  });
 });
 
 // ============================================================

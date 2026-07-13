@@ -119,6 +119,47 @@ export function isFair(c, thresholdS = 5 * 60) {
   return Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0)) <= thresholdS;
 }
 
+/**
+ * Rank by distance to the geographic midpoint, with fairness as tiebreaker.
+ * This is the "closest to midpoint" ranking -- what most users actually want
+ * when they say "find a place in the middle". Drives the default order in
+ * the UI; the user can switch to total/fairness via the sort tabs.
+ *
+ * `mid` is the geographic midpoint {lat, lon}. `candidates` must already
+ * carry eta_a_s / eta_b_s if you want fairness to break ties intelligently.
+ */
+export function rankByMidpointDistance(candidates, mid) {
+  if (!mid) return rankByFairnessFirst(candidates);
+  return [...candidates]
+    .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon))
+    .map((c, i) => ({ ...c, _idx: i }))
+    .sort((x, y) => {
+      const dX = haversine(mid, x);
+      const dY = haversine(mid, y);
+      if (dX !== dY) return dX - dY;
+      // Tiebreaker: smaller fairness gap is better
+      const fX = Math.abs((x.eta_a_s ?? 0) - (x.eta_b_s ?? 0));
+      const fY = Math.abs((y.eta_a_s ?? 0) - (y.eta_b_s ?? 0));
+      if (fX !== fY) return fX - fY;
+      return x._idx - y._idx;
+    });
+}
+
+/**
+ * Rank by minimum total drive time (eta_a_s + eta_b_s) ascending.
+ */
+export function rankByTotalDrive(candidates) {
+  return [...candidates]
+    .filter((c) => Number.isFinite(c.eta_a_s) && Number.isFinite(c.eta_b_s))
+    .map((c, i) => ({ ...c, _idx: i }))
+    .sort((x, y) => {
+      const totX = x.eta_a_s + x.eta_b_s;
+      const totY = y.eta_a_s + y.eta_b_s;
+      if (totX !== totY) return totX - totY;
+      return x._idx - y._idx;
+    });
+}
+
 // Average urban driving speed (m/s). ~30 km/h is a reasonable assumption for
 // Istanbul, London, NYC, etc. We use this when OSRM is down so the app still
 // gives a ranked list instead of failing entirely.

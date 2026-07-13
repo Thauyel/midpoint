@@ -10,6 +10,9 @@ import {
   fmtEta,
   fmtDist,
   rankByFairness,
+  rankByFairnessFirst,
+  rankByMidpointDistance,
+  rankByTotalDrive,
   isFair,
   haversineEta,
   lerpLatLon,
@@ -295,6 +298,49 @@ test("rankByFairness prefers small |Δ| when totals are equal", () => {
   // rankByFairness returns new objects (spread) so compare eta fields
   if (ranked[0].eta_a_s !== 900 || ranked[0].eta_b_s !== 900) {
     throw new Error(`expected a first, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByMidpointDistance sorts by distance to midpoint ascending", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  // Place near midpoint
+  const near = { lat: 41.001, lon: 29.001, eta_a_s: 900, eta_b_s: 900 };
+  // Place on the geographic far side
+  const far  = { lat: 41.05, lon: 29.05,  eta_a_s: 600, eta_b_s: 600 };
+  const ranked = rankByMidpointDistance([far, near], mid);
+  if (ranked[0].lat !== near.lat) {
+    throw new Error(`expected "near" first (closer to mid), got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByMidpointDistance breaks ties by fairness when distances are equal", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  // Two places at the SAME distance from mid -- one fair, one unfair
+  const fair =   { lat: 41.01, lon: 29.0, eta_a_s: 600, eta_b_s: 600 };
+  const unfair = { lat: 41.01, lon: 29.0, eta_a_s: 300, eta_b_s: 900 };
+  // To make sure they have ~equal distance, mirror coords: use the same point twice
+  const ranked = rankByMidpointDistance([unfair, { ...fair }], mid);
+  if (ranked[0].eta_a_s !== fair.eta_a_s) {
+    throw new Error(`expected fair tie-breaker to win, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByTotalDrive sorts by total ascending", () => {
+  const fast = { eta_a_s: 300, eta_b_s: 300 };  // total 600
+  const slow = { eta_a_s: 900, eta_b_s: 900 };  // total 1800
+  const ranked = rankByTotalDrive([slow, fast]);
+  if (ranked[0].eta_a_s !== fast.eta_a_s) {
+    throw new Error(`expected fast first, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByFairnessFirst places a fair point ahead of an unfair one even if total is longer", () => {
+  const a = { eta_a_s: 900, eta_b_s: 900 };  // fair, total 1800
+  const b = { eta_a_s: 700, eta_b_s: 700 };  // also fair, total 1400
+  const c = { eta_a_s: 200, eta_b_s: 800 };  // |Δ|=600 (unfair)
+  const ranked = rankByFairnessFirst([c, b, a]);
+  if (ranked[0] === c || ranked[2] === c) {
+    throw new Error(`expected c (unfair) last, got order [${ranked.map(r => r.eta_a_s).join(", ")}]`);
   }
 });
 
