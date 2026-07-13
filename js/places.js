@@ -153,7 +153,14 @@ async function nominatimPoiSearch(mid, categories, radiusM, signal) {
   const viewbox = buildViewbox(mid, radiusM);
   const results = [];
   const seen = new Set();
-  for (const q of queries) {
+
+  // Fire all category queries for this anchor IN PARALLEL. Nominatim's
+  // 1-req-per-second limit is per-source-IP and we typically issue 3-6
+  // queries per anchor; if Nominatim 429s us, we'll just retry that one
+  // query with a 1.1s backoff. In practice the public endpoint is
+  // forgiving enough for 5-6 concurrent queries from a Vercel edge IP.
+  const tasks = queries.map(async (q) => {
+    if (signal?.aborted) return [];
     const url = new URL(NOMINATIM_ENDPOINT);
     url.searchParams.set("q", q);
     url.searchParams.set("format", "jsonv2");
@@ -162,35 +169,50 @@ async function nominatimPoiSearch(mid, categories, radiusM, signal) {
     url.searchParams.set("bounded", "1");
     url.searchParams.set("addressdetails", "0");
     try {
-      const res = await fetch(url, {
+      let res = await fetch(url, {
         headers: {
           ...BROWSER_HEADERS,
           "Accept": "application/json",
         },
         signal,
       });
-      if (!res.ok) continue;
+      if (res.status === 429) {
+        // one quick retry after the rate-limit window
+        await sleep(1100);
+        res = await fetch(url, {
+          headers: { ...BROWSER_HEADERS, "Accept": "application/json" },
+          signal,
+        });
+      }
+      if (!res.ok) return [];
       const data = await res.json();
+      const hits = [];
       for (const hit of data) {
         const lat = parseFloat(hit.lat);
         const lon = parseFloat(hit.lon);
         const name = (hit.display_name || "").split(",")[0].trim();
         if (!name || !isFinite(lat) || !isFinite(lon)) continue;
-        const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        results.push({
-          id: `nominatim/${hit.osm_type || "n"}/${hit.osm_id || key}`,
-          name,
-          lat,
-          lon,
-          category: inferCategoryFromClass(hit, categories),
-          tags: {},
-        });
+        hits.push({ name, lat, lon, hit });
       }
+      return hits;
     } catch {
-      // one query failing shouldn't kill the whole fallback
+      return [];
     }
+  });
+
+  const allHits = (await Promise.all(tasks)).flat();
+  for (const { name, lat, lon, hit } of allHits) {
+    const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push({
+      id: `nominatim/${hit.osm_type || "n"}/${hit.osm_id || key}`,
+      name,
+      lat,
+      lon,
+      category: inferCategoryFromClass(hit, categories),
+      tags: {},
+    });
   }
   return results;
 }
@@ -354,6 +376,15 @@ export function clearCache() {
  * or their geographic midpoint falls in the sea -- we sample anchors along
  * the line A->B and search around each.
  *
+ * Internally: each anchor is queried via the Nominatim POI fallback path
+ * directly (not via findPlaces), because:
+ *   1. Overpass is rate-limited and slow per-mirror; we don't want to
+ *      hit 3 Overpass mirrors × N anchors = 30+ requests just for one find.
+ *   2. The line-anchor strategy inherently needs MANY small queries,
+ *      not one big Overpass query -- so Nominatim's "one request per
+ *      category" pattern actually fits better.
+ *   3. Nominatim has CORS-friendly access from any browser origin.
+ *
  * Returns [{ id, name, lat, lon, category, tags }]. Never throws: errors on
  * individual anchors are swallowed and we move on.
  */
@@ -362,11 +393,11 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
   if (!Array.isArray(categories) || categories.length === 0) return [];
 
   const all = [];
-  const seen = []; // for 30m dedup
+  const seen = []; // for ~30m dedup
   for (const anchor of anchors) {
     if (signal?.aborted) return all;
     try {
-      const places = await findPlaces(anchor, categories, radiusM, { signal });
+      const places = await nominatimPoiSearch(anchor, categories, radiusM, signal);
       for (const p of places) {
         const dupe = seen.some((q) =>
           Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
