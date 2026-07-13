@@ -206,6 +206,13 @@ async function photonGeocode(query, limit, signal) {
         const bits = [props.name, props.street, props.city || props.town || props.village, props.state, props.country]
           .filter(Boolean);
         const country = (props.country || "").toLowerCase();
+        const city = props.city || props.town || props.village || props.state || "";
+        // Heuristic: major Turkish cities get a big boost. Photon's
+        // osm_importance is 0 for all of them, so we have to rank by
+        // something else. This isn't perfect but it puts İstanbul /
+        // Ankara / İzmir at the top for any "X, Istanbul"-style match.
+        const major = ["istanbul", "ankara", "izmir", "bursa", "antalya", "adana", "konya"];
+        const isMajor = major.some((m) => city.toLowerCase().includes(m));
         return {
           lat: typeof lat === "number" ? lat : parseFloat(lat),
           lon: typeof lon === "number" ? lon : parseFloat(lon),
@@ -213,25 +220,27 @@ async function photonGeocode(query, limit, signal) {
           type: props.osm_value || props.type || "",
           importance: typeof props.osm_importance === "number" ? props.osm_importance : 0.5,
           _turkey: props.countrycode === "TR" || country.includes("turk") || country.includes("türk"),
+          _major: isMajor,
         };
       })
       .filter((r) => isFinite(r.lat) && isFinite(r.lon));
 
     // If at least 2 of the top results are Turkish, drop any non-Turkish
     // ones -- Photon sometimes ranks a small village named "Kartal" in
-    // Hungary above Istanbul's Kartal district. This filter prefers
-    // Turkish matches when there are enough of them.
+    // Hungary above Istanbul's Kartal district.
     const turkishCount = enriched.filter((r) => r._turkey).length;
     const preferTurkey = wantTurkey || turkishCount >= 2;
 
     return enriched
       .filter((r) => !preferTurkey || r._turkey || r.importance > 0.85)
       .sort((a, b) => {
+        // Major Turkish cities first
+        if (preferTurkey && a._major !== b._major) return a._major ? -1 : 1;
         if (preferTurkey && a._turkey !== b._turkey) return a._turkey ? -1 : 1;
         return (b.importance ?? 0) - (a.importance ?? 0);
       })
       .slice(0, limit)
-      .map(({ _turkey, ...rest }) => rest);
+      .map(({ _turkey, _major, ...rest }) => rest);
   } catch {
     return [];
   }
