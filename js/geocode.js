@@ -61,6 +61,10 @@ export async function geocode(query, { signal, limit = SUGGEST_LIMIT } = {}) {
       throw makeError("ZERO_RESULTS", `no results for "${query}"`);
     }
 
+    // photonGeocode already sorts by our major-city preference; we
+    // DON'T re-sort here because the public geocoder APIs all return
+    // importance=0 for the Turkish matches and a stable sort would
+    // preserve Photon's (often wrong) original order.
     const results = data
       .map((hit) => ({
         lat: typeof hit.lat === "number" ? hit.lat : parseFloat(hit.lat),
@@ -70,7 +74,6 @@ export async function geocode(query, { signal, limit = SUGGEST_LIMIT } = {}) {
         importance: typeof hit.importance === "number" ? hit.importance : 0,
       }))
       .filter((r) => isFinite(r.lat) && isFinite(r.lon))
-      .sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0))
       .slice(0, limit);
 
     if (results.length === 0) {
@@ -233,6 +236,7 @@ async function photonGeocode(query, limit, signal) {
           importance: typeof props.osm_importance === "number" ? props.osm_importance : 0.5,
           _turkey: props.countrycode === "TR" || country.includes("turk") || country.includes("türk"),
           _major: isMajor,
+          _osmBig: osmValue === "city" || osmValue === "town",
         };
       })
       .filter((r) => isFinite(r.lat) && isFinite(r.lon));
