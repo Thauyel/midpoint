@@ -155,24 +155,28 @@ function inferCategoryFromPhoton(hit, requested) {
 
 async function photonPoiSearch(mid, categories, radiusM, signal) {
   const filters = photonFilters(categories);
-  // Photon uses lat/lon + a "zoom"-like distance, not a radius. We use
-  // `location_bias_scale=2&zoom=15` to bias results near the point with
-  // ~1km precision (zoom 15 = city-block scale). The `lang` defaults to
-  // local; we don't set it so the API uses its own heuristic.
+  // Photon's `osm_tag` filter only accepts ONE value per request. With
+  // multiple categories we'd ideally send multiple requests, but we can
+  // also fall back to using the `q` text query which Photon interprets
+  // broadly. We do one combined query that includes the most popular
+  // amenity keywords.
+  const qTerms = {
+    cafe:       "cafe",
+    restaurant: "restaurant",
+    bar:        "bar",
+    park:       "park",
+  };
+  const q = categories.map((c) => qTerms[c]).filter(Boolean).join(" ");
   const url = new URL(PHOTON_ENDPOINT);
+  url.searchParams.set("q", q || "cafe restaurant bar park");
   url.searchParams.set("lat", String(mid.lat));
   url.searchParams.set("lon", String(mid.lon));
-  // Photon's `q` is an optional text filter; we use it to bias toward the
-  // category keyword if there's a single category. With multi-category we
-  // skip the q filter and rely on `osm_tag` filters below.
-  if (categories.length === 1 && categories[0] !== "generic") {
-    url.searchParams.set("q", categories[0]);
-  }
-  // Apply OSM tag filters (limit=50 per call so we get a decent pool).
   url.searchParams.set("limit", "30");
   url.searchParams.set("zoom", "15");
-  for (const kv of filters) {
-    url.searchParams.set("osm_tag", kv);
+  // Photon supports one osm_tag. If we have a single category, use it as
+  // a precision filter; otherwise let the q text query handle the matching.
+  if (filters.length === 1) {
+    url.searchParams.set("osm_tag", filters[0]);
   }
   try {
     const res = await fetch(url, {
@@ -188,16 +192,24 @@ async function photonPoiSearch(mid, categories, radiusM, signal) {
       const [lon, lat] = f.geometry?.coordinates || [];
       const name = f.properties?.name;
       if (!name || !isFinite(lat) || !isFinite(lon)) continue;
+      // Filter: only keep features whose osm_key+osm_value match one of our
+      // requested categories. Photon's q is fuzzy; we tighten it here.
+      const props = f.properties || {};
+      const matched = filters.some((kv) => {
+        const [k, v] = kv.split(":");
+        return props.osm_key === k && props.osm_value === v;
+      });
+      if (filters.length > 0 && !matched) continue;
       const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
       if (seen.has(key)) continue;
       seen.add(key);
       results.push({
-        id: `photon/${f.properties?.osm_type || "n"}/${f.properties?.osm_id || key}`,
+        id: `photon/${props.osm_type || "n"}/${props.osm_id || key}`,
         name,
         lat,
         lon,
         category: inferCategoryFromPhoton(f, categories),
-        tags: f.properties || {},
+        tags: props,
       });
     }
     return results;
