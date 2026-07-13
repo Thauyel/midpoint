@@ -10,6 +10,9 @@
 const ENDPOINT = "https://router.project-osrm.org/table/v1/driving";
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 800;
+// Hard timeout per OSRM call. The public demo is occasionally slow to first
+// byte; we'd rather retry than block forever.
+const REQUEST_TIMEOUT_MS = 15000;
 
 // Browser-like headers (OSRM demo enforces browser signals from datacenter IPs).
 const HEADERS = {
@@ -72,11 +75,16 @@ export async function osrmTable(sources, destinations, { signal } = {}) {
 
     let lastErr = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // Per-attempt hard timeout via AbortController.
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), REQUEST_TIMEOUT_MS);
+      if (signal) signal.addEventListener("abort", () => ctl.abort(), { once: true });
       try {
         const res = await fetch(url, {
           headers: HEADERS,
-          signal,
+          signal: ctl.signal,
         });
+        clearTimeout(timer);
         if (res.status === 429) {
           lastErr = makeError("RATE_LIMITED", `429 on attempt ${attempt}`);
           await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
@@ -101,7 +109,13 @@ export async function osrmTable(sources, destinations, { signal } = {}) {
         cache.set(key, result);
         return result;
       } catch (e) {
-        if (e?.name === "AbortError") throw e;
+        clearTimeout(timer);
+        if (e?.name === "AbortError") {
+          if (signal?.aborted) throw makeError("ABORTED", "caller aborted");
+          lastErr = makeError("NETWORK", `timeout on attempt ${attempt}`);
+          await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
+          continue;
+        }
         if (e?.code === "OSRM") throw e;
         lastErr = makeError("NETWORK", e?.message || "fetch failed");
         await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
