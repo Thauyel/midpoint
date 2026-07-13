@@ -3,12 +3,12 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js";
-import { findPlaces } from "./places.js";
-import { osrmTable } from "./routing.js";
-import { midpoint, rankByFairness, fmtEta, fmtDist, isFair, haversine, haversineEta } from "./midpoint.js";
-import { MidpointMap } from "./map.js";
-import { t, applyTranslations, getLanguage } from "./i18n.js";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=8";
+import { findPlaces } from "./places.js?v=8";
+import { osrmTable } from "./routing.js?v=8";
+import { midpoint, rankByFairness, fmtEta, fmtDist, isFair, haversine, haversineEta } from "./midpoint.js?v=8";
+import { MidpointMap } from "./map.js?v=8";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=8";
 
 const RADIUS_M = 1500;
 const DEBOUNCE_MS = 350;
