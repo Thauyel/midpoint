@@ -206,14 +206,15 @@ async function photonGeocode(query, limit, signal) {
         const bits = [props.name, props.street, props.city || props.town || props.village, props.state, props.country]
           .filter(Boolean);
         const country = (props.country || "").toLowerCase();
-        const city = props.city || props.town || props.village || props.state || "";
-        const state = props.state || "";
+        const city = (props.city || props.town || props.village || props.state || "").toLowerCase();
+        const state = (props.state || "").toLowerCase();
         // Heuristic: major Turkish cities get a big boost. Photon's
         // osm_importance is 0 for all of them, so we have to rank by
-        // something else. This isn't perfect but it puts İstanbul /
-        // Ankara / İzmir at the top for any "X, Istanbul"-style match.
+        // something else. We normalize Turkish dotted-İ (İ -> i)
+        // before comparison because JS's toLowerCase() doesn't fold it.
+        const norm = (s) => s.replace(/İ/g, "i").replace(/ı/g, "i").toLowerCase();
         const major = ["istanbul", "ankara", "izmir", "bursa", "antalya", "adana", "konya"];
-        const isMajor = major.some((m) => city.toLowerCase().includes(m) || state.toLowerCase().includes(m));
+        const isMajor = major.some((m) => norm(city).includes(m) || norm(state).includes(m));
         return {
           lat: typeof lat === "number" ? lat : parseFloat(lat),
           lon: typeof lon === "number" ? lon : parseFloat(lon),
