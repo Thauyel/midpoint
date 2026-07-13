@@ -387,14 +387,17 @@ async function runPipeline() {
     }
 
     const enriched = candidates.map((p, i) => {
-      // Prefer OSRM's real ETA; fall back to straight-line estimate if it failed
-      // or returned null/undefined for this candidate.
-      const eta_a_s = matrix?.durations?.[0]?.[i] ?? haversineEta(haversine(a, p));
-      const eta_b_s = matrix?.durations?.[1]?.[i] ?? haversineEta(haversine(b, p));
+      // Prefer OSRM's real ETA; fall back to straight-line estimate if it
+      // failed, returned null, or returned 0 (which OSRM does for distances
+      // shorter than its routing resolution).
+      const osrmA = matrix?.durations?.[0]?.[i];
+      const osrmB = matrix?.durations?.[1]?.[i];
+      const useOsrmA = Number.isFinite(osrmA) && osrmA > 0;
+      const useOsrmB = Number.isFinite(osrmB) && osrmB > 0;
       return {
         ...p,
-        eta_a_s,
-        eta_b_s,
+        eta_a_s: useOsrmA ? osrmA : haversineEta(haversine(a, p)),
+        eta_b_s: useOsrmB ? osrmB : haversineEta(haversine(b, p)),
         distance_a_m: matrix?.distances?.[0]?.[i] ?? haversine(a, p),
         distance_b_m: matrix?.distances?.[1]?.[i] ?? haversine(b, p),
       };
