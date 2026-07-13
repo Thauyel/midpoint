@@ -8,20 +8,17 @@
 //    - Use the `accept-language=en` header for stable display
 // ============================================================
 
-const ENDPOINT = "https://nominatim.openstreetmap.org/search";
-const PHOTON_GEOCODE = "https://photon.komoot.io/api/";
+const ENDPOINT = "/api/nominatim";            // proxied via Vercel serverless function
+const PHOTON_GEOCODE = "/api/photon";         // proxied via Vercel serverless function
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 900;
 const SUGGEST_LIMIT = 6;
 
-// Browser-like headers. Nominatim's edge blocks default fetch UAs from
-// datacenter ranges. Real browsers send these, so we mirror that.
+// When calling our own /api proxy, only minimal headers are needed. The
+// proxy attaches browser-like User-Agent/Referer server-side.
 const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Accept": "application/json",
   "Accept-Language": "en-US,en;q=0.9",
-  "Referer": "https://www.openstreetmap.org/",
-  "Origin": "https://www.openstreetmap.org",
 };
 
 const cache = new Map(); // key: lower(query) -> {lat, lon, display_name, _ts}
@@ -135,10 +132,10 @@ export async function reverse(lat, lon, { signal } = {}) {
   // Nominatim fallback for reverse.
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const url = new URL("https://nominatim.openstreetmap.org/reverse");
+      const url = new URL("/api/nominatim", window.location.origin);
+      url.searchParams.set("mode", "reverse");
       url.searchParams.set("lat", String(lat));
       url.searchParams.set("lon", String(lon));
-      url.searchParams.set("format", "jsonv2");
       url.searchParams.set("zoom", "16");
 
       const res = await fetch(url, {

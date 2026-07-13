@@ -26,14 +26,10 @@ const BROWSER_HEADERS = {
 };
 
 const ENDPOINTS = [
-  // kumi.systems is the most reliable from browser contexts (CORS-friendly
-  // and forwards to the main Overpass cluster). We try it first.
-  "https://overpass.kumi.systems/api/interpreter",
-  // api.de is the canonical but enforces CORS strictly on POST from browser
-  // origins other than openstreetmap.org, so it usually fails from Vercel.
-  "https://overpass-api.de/api/interpreter",
-  // osm.ch has a stale DB (timestamp often weeks old) and is the last resort.
-  "https://overpass.osm.ch/api/interpreter",
+  // All Overpass queries now route through the Vercel serverless proxy
+  // (/api/overpass), which fans out to the public mirrors server-to-server.
+  // This sidesteps both CORS and the browser-rate-limit problem entirely.
+  "/api/overpass",
 ];
 
 const MAX_ATTEMPTS = 2;
@@ -117,7 +113,7 @@ function makeKey(mid, categories, radiusM) {
 // Returns GeoJSON FeatureCollection. Each feature has properties.osm_key,
 // properties.osm_value, properties.name, and geometry.coordinates [lon, lat].
 
-const PHOTON_ENDPOINT = "https://photon.komoot.io/api/";
+const PHOTON_ENDPOINT = "/api/photon";   // proxied via Vercel serverless function
 
 // Map our app categories to OSM tags. Photon's filter syntax uses
 // `osm_tag=KEY:VALUE` (with a colon separating key from value), e.g.
@@ -236,7 +232,7 @@ async function photonPoiSearch(mid, categories, radiusM, signal) {
 // Photon can occasionally be down. As a last resort we fall back to
 // Nominatim with strict rate-limit-aware throttling.
 
-const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+const NOMINATIM_ENDPOINT = "/api/nominatim";   // proxied via Vercel serverless function
 
 const CATEGORY_QUERIES = {
   cafe:       ["cafe", "coffee"],

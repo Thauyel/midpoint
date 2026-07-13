@@ -7,20 +7,20 @@
 //  profiles globally and is rate-limited but cacheable.
 // ============================================================
 
-const ENDPOINT = "https://router.project-osrm.org/table/v1/driving";
+// All OSRM calls now route through the Vercel serverless proxy (/api/osrm),
+// which forwards to router.project-osrm.org server-to-server. This
+// sidesteps both CORS and the browser-rate-limit problem entirely.
+const PROXY_BASE = "/api/osrm";
+const UPSTREAM_BASE = "https://router.project-osrm.org";
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 800;
 // Hard timeout per OSRM call. The public demo is occasionally slow to first
 // byte; we'd rather retry than block forever.
 const REQUEST_TIMEOUT_MS = 15000;
 
-// Browser-like headers (OSRM demo enforces browser signals from datacenter IPs).
+// When calling our own /api proxy, only minimal headers are needed.
 const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Accept": "application/json",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Referer": "https://www.openstreetmap.org/",
-  "Origin": "https://www.openstreetmap.org",
 };
 
 const cache = new Map();
@@ -74,7 +74,12 @@ export async function osrmTable(sources, destinations, { signal } = {}) {
     params.set("sources", "0;1");
     params.set("destinations", "all");
     params.set("annotations", "duration,distance");
-    const url = `${ENDPOINT}/${allCoords}?${params}`;
+    // Route through the Vercel proxy. The proxy expects the path portion
+    // of the upstream URL as `?path=` so it can forward verbatim. This
+    // sidesteps both CORS (browser → /api same-origin) and rate-limits
+    // (server-to-server upstream, not browser-fetch).
+    const upstreamPath = `/table/v1/driving/${allCoords}`;
+    const proxyUrl = `${PROXY_BASE}?path=${encodeURIComponent(upstreamPath)}&${params.toString()}`;
 
     let lastErr = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -83,7 +88,7 @@ export async function osrmTable(sources, destinations, { signal } = {}) {
       const timer = setTimeout(() => ctl.abort(), REQUEST_TIMEOUT_MS);
       if (signal) signal.addEventListener("abort", () => ctl.abort(), { once: true });
       try {
-        const res = await fetch(url, {
+        const res = await fetch(proxyUrl, {
           headers: HEADERS,
           signal: ctl.signal,
         });
