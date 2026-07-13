@@ -105,6 +105,110 @@ function makeKey(mid, categories, radiusM) {
   return `${lat},${lon}|${[...categories].sort().join(",")}|${radiusM}`;
 }
 
+// ---------- Nominatim fallback (POI search) ----------
+//
+// Overpass's public mirrors are unreliable from browser contexts (CORS-
+// blocking on api.de, slow on kumi, stale on osm.ch). When all of them fail
+// or return zero results, we fall back to Nominatim's regular search with
+// `viewbox` + `bounded=1`. Nominatim is CORS-friendly everywhere and has
+// decent POI coverage for cafes/restaurants in cities.
+
+const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+
+// Maps our app's category → a list of free-text queries Nominatim matches
+// against POI tags. Multiple queries give us more candidates.
+const CATEGORY_QUERIES = {
+  cafe:       ["cafe", "coffee"],
+  restaurant: ["restaurant", "fast food"],
+  bar:        ["bar", "pub"],
+  park:       ["park", "garden"],
+  generic:    ["cafe", "restaurant", "bar", "pub", "park"],
+};
+
+function makeNominatimQueries(categories) {
+  const seen = new Set();
+  const out = [];
+  for (const c of categories) {
+    for (const q of (CATEGORY_QUERIES[c] || CATEGORY_QUERIES.generic)) {
+      if (!seen.has(q)) { seen.add(q); out.push(q); }
+    }
+  }
+  return out;
+}
+
+function buildViewbox(mid, radiusM) {
+  // ~111000 m per degree of latitude. Convert radius to lon offset using cos(lat).
+  const dLat = radiusM / 111000;
+  const dLon = radiusM / (111000 * Math.cos((mid.lat * Math.PI) / 180));
+  const left   = mid.lon - dLon;
+  const right  = mid.lon + dLon;
+  const top    = mid.lat + dLat;
+  const bottom = mid.lat - dLat;
+  // Nominatim wants "left,top,right,bottom" (lon,lat,lon,lat).
+  return `${left.toFixed(5)},${top.toFixed(5)},${right.toFixed(5)},${bottom.toFixed(5)}`;
+}
+
+async function nominatimPoiSearch(mid, categories, radiusM, signal) {
+  const queries = makeNominatimQueries(categories);
+  const viewbox = buildViewbox(mid, radiusM);
+  const results = [];
+  const seen = new Set();
+  for (const q of queries) {
+    const url = new URL(NOMINATIM_ENDPOINT);
+    url.searchParams.set("q", q);
+    url.searchParams.set("format", "jsonv2");
+    url.searchParams.set("limit", "20");
+    url.searchParams.set("viewbox", viewbox);
+    url.searchParams.set("bounded", "1");
+    url.searchParams.set("addressdetails", "0");
+    try {
+      const res = await fetch(url, {
+        headers: {
+          ...BROWSER_HEADERS,
+          "Accept": "application/json",
+        },
+        signal,
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const hit of data) {
+        const lat = parseFloat(hit.lat);
+        const lon = parseFloat(hit.lon);
+        const name = (hit.display_name || "").split(",")[0].trim();
+        if (!name || !isFinite(lat) || !isFinite(lon)) continue;
+        const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push({
+          id: `nominatim/${hit.osm_type || "n"}/${hit.osm_id || key}`,
+          name,
+          lat,
+          lon,
+          category: inferCategoryFromClass(hit, categories),
+          tags: {},
+        });
+      }
+    } catch {
+      // one query failing shouldn't kill the whole fallback
+    }
+  }
+  return results;
+}
+
+function inferCategoryFromClass(hit, requested) {
+  const cls = (hit.class || "").toLowerCase();
+  const typ = (hit.type || "").toLowerCase();
+  if (cls === "amenity" && typ === "cafe") return "cafe";
+  if (cls === "amenity" && (typ === "restaurant" || typ === "fast_food" || typ === "food_court")) return "restaurant";
+  if (cls === "amenity" && (typ === "bar" || typ === "pub" || typ === "biergarten")) return "bar";
+  if (cls === "leisure" && (typ === "park" || typ === "garden")) return "park";
+  // fall back to preserving order
+  for (const c of requested) {
+    if (CATEGORY_QUERIES[c]?.some(q => (hit.display_name || "").toLowerCase().includes(q))) return c;
+  }
+  return requested[0] || "generic";
+}
+
 /**
  * Query Overpass. Returns [{ id, name, lat, lon, category, tags }].
  * Errors have .code: "OVERPASS_FAILED" / "NETWORK" / "EMPTY".
@@ -121,7 +225,8 @@ export async function findPlaces(mid, categories, radiusM = 2000, { signal } = {
     const query = buildQuery(mid, categories, radiusM);
     let lastErr = null;
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let overpassResults = [];
+    outer: for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       for (const endpoint of ENDPOINTS) {
         // Compose an AbortController so a slow mirror doesn't make us wait
         // 30+ seconds before trying the next one.
@@ -148,13 +253,8 @@ export async function findPlaces(mid, categories, radiusM = 2000, { signal } = {
             continue;
           }
           const data = await res.json();
-          const out = parseOverpass(data, categories);
-          // An empty result isn't necessarily a failure of THIS endpoint, but
-          // if all three mirrors return empty then we know the area has
-          // nothing in OSM (rare in cities). Surface that so the caller can
-          // try the Nominatim fallback.
-          cache.set(key, out);
-          return out;
+          overpassResults = parseOverpass(data, categories);
+          break outer; // success -- regardless of count, don't keep hammering mirrors
         } catch (e) {
           clearTimeout(timer);
           // If the caller aborted, propagate immediately.
@@ -170,7 +270,31 @@ export async function findPlaces(mid, categories, radiusM = 2000, { signal } = {
       }
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
     }
-    throw lastErr ?? makeError("OVERPASS_FAILED", "all endpoints failed");
+
+    // If Overpass gave us any results, use them.
+    if (overpassResults.length > 0) {
+      cache.set(key, overpassResults);
+      return overpassResults;
+    }
+
+    // Overpass returned 0 hits OR every mirror failed -- fall back to
+    // Nominatim's POI search. Slower and noisier but CORS-friendly and
+    // available everywhere.
+    console.warn(
+      "Overpass returned no results / failed; falling back to Nominatim POI search.",
+      lastErr?.message || ""
+    );
+    const fallback = await nominatimPoiSearch(mid, categories, radiusM, signal);
+    if (fallback.length > 0) {
+      cache.set(key, fallback);
+      return fallback;
+    }
+
+    // Neither source returned anything. If Overpass gave us 0 with no errors
+    // it's genuinely an empty area; if every mirror failed, surface that.
+    if (lastErr) throw lastErr;
+    cache.set(key, []);
+    return [];
   })();
 
   inflight.set(key, promise);
