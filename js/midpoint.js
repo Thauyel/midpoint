@@ -104,6 +104,11 @@ export function isFair(c, thresholdS = 5 * 60) {
 // gives a ranked list instead of failing entirely.
 export const URBAN_DRIVE_M_S = 30 * 1000 / 3600; // 8.333
 
+// Minimum plausible ETA floor (seconds) when the straight-line distance is
+// very short -- so we don't display "0 s" / "0 min" for cafes sitting on
+// top of one of the two endpoints.
+export const MIN_ETA_S = 90; // 1.5 min -- realistic for parking + walk to door
+
 /**
  * Fallback ETA from straight-line distance. Used when OSRM /table is
  * unavailable (rate-limited / CORS-blocked / timed out). Less accurate than
@@ -111,5 +116,5 @@ export const URBAN_DRIVE_M_S = 30 * 1000 / 3600; // 8.333
  */
 export function haversineEta(distanceM, speedMps = URBAN_DRIVE_M_S) {
   if (distanceM == null || !isFinite(distanceM)) return null;
-  return distanceM / speedMps;
+  return Math.max(MIN_ETA_S, distanceM / speedMps);
 }
