@@ -393,13 +393,16 @@ async function runPipeline() {
     // findPlacesAlways tries the smart anchor set first with the scaled
     // radius; if that returns fewer than 5 places (or zero), it widens
     // the search around the geographic midpoint with progressively larger
-    // radii up to maxRadiusM, until it surfaces suggestions. Guarantees
-    // we never show an empty list unless every external API is down.
+    // radii up to maxRadiusM. If STILL empty, falls back to a 3x3 grid
+    // search across the entire A↔B bounding box -- this is the ultimate
+    // "guaranteed suggestions" safety net for any reasonable input.
     const allPlaces = await findPlacesAlways(anchors, [...state.categories], mid, {
       startRadiusM: perAnchorM,
       stepM: Math.max(1500, Math.ceil(directM * 0.1)),
       maxRadiusM,
       minResults: 5,
+      bboxA: a,
+      bboxB: b,
     });
 
     // Drop places whose straight-line distance from BOTH endpoints exceeds

@@ -577,6 +577,7 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
  */
 export async function findPlacesAlways(initialAnchors, categories, mid, {
   signal, minResults = 5, startRadiusM = 1500, stepM = 1500, maxRadiusM = 9000,
+  bboxA = null, bboxB = null,
 } = {}) {
   // First pass: the smart anchor set with the (length-aware) base radius.
   let places = await findPlacesAlong(initialAnchors, categories, startRadiusM, { signal });
@@ -605,7 +606,62 @@ export async function findPlacesAlways(initialAnchors, categories, mid, {
     }
     if (places.length >= minResults) break;
   }
+  if (places.length >= minResults) return places;
+
+  // Third pass: BBOX GRID. If the corridor + midpoint widening still
+  // returned too few results (e.g. the midpoint is over a mountain or
+  // large empty region), split the A↔B bounding box into a 3x3 grid and
+  // search each cell. This is the brute-force "guaranteed suggestions"
+  // fallback -- by sampling every quadrant of the user-defined area, we
+  // statistically cannot land in an empty zone for any reasonable input.
+  if (bboxA && bboxB) {
+    const grid = makeBboxGrid(bboxA, bboxB, 3, 3);
+    const cellRadius = maxRadiusM * 0.6;
+    for (const cell of grid) {
+      if (signal?.aborted) break;
+      const more = await findPlacesAlong(
+        [{ ...cell, _r: cellRadius }],
+        categories,
+        cellRadius,
+        { signal },
+      );
+      if (more.length > 0) {
+        const seen = new Set(places.map((p) => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`));
+        for (const p of more) {
+          const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
+          if (!seen.has(k)) { seen.add(k); places.push(p); }
+        }
+      }
+      if (places.length >= minResults) break;
+    }
+  }
   return places;
+}
+
+/**
+ * Build a `rows x cols` grid of anchor points covering the bounding box
+ * defined by two endpoints. Used as a last-resort fallback when the
+ * smart line + corridor + expanding-mid strategies all fail.
+ */
+function makeBboxGrid(a, b, cols = 3, rows = 3) {
+  const minLat = Math.min(a.lat, b.lat);
+  const maxLat = Math.max(a.lat, b.lat);
+  const minLon = Math.min(a.lon, b.lon);
+  const maxLon = Math.max(a.lon, b.lon);
+  const out = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      // Use cell *centres* (offset by 0.5) so the search circles cover
+      // the whole box, not just the corners.
+      const tLat = (r + 0.5) / rows;
+      const tLon = (c + 0.5) / cols;
+      out.push({
+        lat: minLat + (maxLat - minLat) * tLat,
+        lon: minLon + (maxLon - minLon) * tLon,
+      });
+    }
+  }
+  return out;
 }
 
 function makeError(code, message) {
