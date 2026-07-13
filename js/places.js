@@ -163,7 +163,7 @@ async function photonPoiSearch(mid, categories, radiusM, signal) {
     park:       "park",
   };
   const q = categories.map((c) => qTerms[c]).filter(Boolean).join(" ");
-  const url = new URL(PHOTON_ENDPOINT);
+  const url = new URL(PHOTON_ENDPOINT, location.origin);
   url.searchParams.set("q", q || "cafe restaurant bar park");
   url.searchParams.set("lat", String(mid.lat));
   url.searchParams.set("lon", String(mid.lon));
@@ -275,7 +275,7 @@ async function nominatimPoiSearch(mid, categories, radiusM, signal) {
   const PARALLEL = 3;
   const tasks = queries.map(async (q) => {
     if (signal?.aborted) return [];
-    const url = new URL(NOMINATIM_ENDPOINT);
+    const url = new URL(NOMINATIM_ENDPOINT, location.origin);
     url.searchParams.set("q", q);
     url.searchParams.set("format", "jsonv2");
     url.searchParams.set("limit", "20");

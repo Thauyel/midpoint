@@ -106,7 +106,7 @@ export async function reverse(lat, lon, { signal } = {}) {
   if (cache.has(key)) return cache.get(key);
 
   // Try Photon first (no rate limit). Falls back to Nominatim on failure.
-  const photonUrl = new URL(PHOTON_GEOCODE);
+  const photonUrl = new URL(PHOTON_GEOCODE, location.origin);
   photonUrl.searchParams.set("lat", String(lat));
   photonUrl.searchParams.set("lon", String(lon));
   photonUrl.searchParams.set("limit", "1");
@@ -181,7 +181,10 @@ function makeError(code, message) {
 // the geocode() function is agnostic to which backend served it.
 
 async function photonGeocode(query, limit, signal) {
-  const url = new URL(PHOTON_GEOCODE);
+  // new URL(relative) requires a base. Pass location.origin explicitly so
+  // the proxy URL resolves to https://midpoint-rust.vercel.app/api/photon
+  // instead of throwing "Invalid URL".
+  const url = new URL(PHOTON_GEOCODE, location.origin);
   url.searchParams.set("q", query);
   url.searchParams.set("limit", String(Math.min(limit * 3, 15)));
   // Bias results to Turkey. Photon supports `lang` but no country
@@ -266,7 +269,7 @@ async function nominatimGeocode(query, limit, signal) {
   let lastErr = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const url = new URL(ENDPOINT);
+      const url = new URL(ENDPOINT, location.origin);
       url.searchParams.set("q", query);
       url.searchParams.set("format", "jsonv2");
       url.searchParams.set("limit", String(limit));

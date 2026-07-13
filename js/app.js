@@ -3,8 +3,8 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=35";
-import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=35";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=36";
+import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=36";
 import { osrmTable } from "./routing.js?v=35";
 import { midpoint, rankByFairness, rankByFairnessFirst, rankByMidpointDistance, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=35";
 import { MidpointMap } from "./map.js?v=35";
