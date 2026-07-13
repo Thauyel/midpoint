@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="en">
+<html lang="tr">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#000000" />
-  <meta name="description" content="Find a fair meeting point between two locations. Cafe, restaurant, bar, or park — ranked by equal travel time." />
-  <title>midpoint — find where to meet</title>
+  <meta name="description" content="İki kişi için adil bir buluşma noktası bulun. Cafe, restoran, bar veya park — eşit sürüş süresine göre sıralanmış." />
+  <title data-i18n="meta.title">midpoint — buluşma noktası bul</title>
 
   <link rel="preconnect" href="https://nominatim.openstreetmap.org" />
   <link rel="preconnect" href="https://overpass-api.de" />
@@ -23,28 +23,36 @@
 <body>
 
   <header class="topbar">
-    <h1 class="brand">
+    <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-text">midpoint</span>
-    </h1>
-    <p class="tagline">two places &middot; one fair meeting point</p>
+      <h1 class="brand-text">midpoint</h1>
+    </div>
+    <p class="tagline" data-i18n="tagline">iki yer &middot; bir adil buluşma noktası</p>
+
+    <div class="lang-switch" role="group" aria-label="Language">
+      <button type="button" class="lang-btn is-on" data-lang="tr" aria-pressed="true">TR</button>
+      <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+    </div>
   </header>
 
   <main class="app">
 
-    <section class="card pair" aria-label="Locations">
+    <section class="card pair" aria-label="Konumlar">
       <article class="loc loc-a" data-side="a">
         <header class="loc-head">
           <span class="dot dot-a" aria-hidden="true"></span>
-          <label class="loc-label" for="input-a">Person A</label>
-          <button type="button" class="ghost-btn locate-btn" data-side="a" title="Use my location">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
-            <span>locate me</span>
+          <label class="loc-label" for="input-a" data-i18n="label.person_a">kişi a</label>
+          <button type="button" class="ghost-btn locate-btn" data-side="a" title="Konumumu kullan">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+            <span data-i18n="locate">konumum</span>
           </button>
         </header>
-        <input id="input-a" type="text" class="loc-input"
-               placeholder="address, place, or city…" autocomplete="off"
-               spellcheck="false" />
+        <div class="loc-field">
+          <input id="input-a" type="text" class="loc-input"
+                 placeholder="adres, yer veya şehir…" autocomplete="off"
+                 spellcheck="false" />
+          <ul class="suggestions" data-suggestions="a" role="listbox" hidden></ul>
+        </div>
         <div class="loc-meta" data-meta="a" aria-live="polite"></div>
       </article>
 
@@ -55,45 +63,48 @@
       <article class="loc loc-b" data-side="b">
         <header class="loc-head">
           <span class="dot dot-b" aria-hidden="true"></span>
-          <label class="loc-label" for="input-b">Person B</label>
-          <button type="button" class="ghost-btn locate-btn" data-side="b" title="Use my location">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
-            <span>locate me</span>
+          <label class="loc-label" for="input-b" data-i18n="label.person_b">kişi b</label>
+          <button type="button" class="ghost-btn locate-btn" data-side="b" title="Konumumu kullan">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+            <span data-i18n="locate">konumum</span>
           </button>
         </header>
-        <input id="input-b" type="text" class="loc-input"
-               placeholder="address, place, or city…" autocomplete="off"
-               spellcheck="false" />
+        <div class="loc-field">
+          <input id="input-b" type="text" class="loc-input"
+                 placeholder="adres, yer veya şehir…" autocomplete="off"
+                 spellcheck="false" />
+          <ul class="suggestions" data-suggestions="b" role="listbox" hidden></ul>
+        </div>
         <div class="loc-meta" data-meta="b" aria-live="polite"></div>
       </article>
     </section>
 
-    <section class="card cats" aria-label="Place categories">
-      <span class="cats-label">what kind of place?</span>
-      <div class="cat-chips" role="group" aria-label="Category filters">
-        <button type="button" class="chip is-on" data-cat="cafe"    aria-pressed="true">cafe</button>
-        <button type="button" class="chip is-on" data-cat="restaurant" aria-pressed="true">restaurant</button>
-        <button type="button" class="chip is-on" data-cat="bar"     aria-pressed="true">bar</button>
-        <button type="button" class="chip"        data-cat="park"    aria-pressed="false">park</button>
-        <button type="button" class="chip"        data-cat="generic" aria-pressed="false">any</button>
+    <section class="card cats" aria-label="Yer türleri">
+      <span class="cats-label" data-i18n="cats.label">ne tür bir yer?</span>
+      <div class="cat-chips" role="group" aria-label="Kategori filtreleri">
+        <button type="button" class="chip is-on" data-cat="cafe"      aria-pressed="true"  data-i18n="cat.cafe">cafe</button>
+        <button type="button" class="chip is-on" data-cat="restaurant" aria-pressed="true"  data-i18n="cat.restaurant">restoran</button>
+        <button type="button" class="chip is-on" data-cat="bar"       aria-pressed="true"  data-i18n="cat.bar">bar</button>
+        <button type="button" class="chip"        data-cat="park"      aria-pressed="false" data-i18n="cat.park">park</button>
+        <button type="button" class="chip"        data-cat="generic"   aria-pressed="false" data-i18n="cat.generic">hepsi</button>
       </div>
     </section>
 
-    <section class="card action" aria-label="Find midpoint">
+    <section class="card action" aria-label="Buluşma noktasını bul">
       <button id="find-btn" type="button" class="primary-btn" disabled>
-        <span class="btn-text">find midpoint</span>
+        <span class="btn-text" data-i18n="find">ortayı bul</span>
         <span class="btn-spinner" aria-hidden="true"></span>
       </button>
-      <p class="hint" id="hint">enter two places to begin.</p>
+      <p class="hint" id="hint" data-i18n="hint.start">başlamak için iki yer gir.</p>
     </section>
 
-    <section class="map-wrap" aria-label="Map">
-      <div id="map" class="map" role="application" aria-label="Meeting point map"></div>
+    <section class="map-wrap" aria-label="Harita">
+      <div id="map" class="map" role="application" aria-label="Buluşma noktası haritası"></div>
     </section>
 
-    <section class="results" id="results" aria-label="Recommended places" hidden>
+    <section class="results" id="results" aria-label="Önerilen yerler" hidden>
       <header class="results-head">
-        <h2>best spots nearby</h2>
+        <h2 data-i18n="results.title">yakındaki en iyi yerler</h2>
         <span class="results-sub" id="results-sub"></span>
       </header>
       <ol class="result-list" id="result-list"></ol>
@@ -103,23 +114,24 @@
 
   <footer class="footbar">
     <span class="foot-quiet">data &middot; openstreetmap &middot; osrm &middot; overpass</span>
-    <button type="button" id="about-btn" class="ghost-btn foot-link">about</button>
+    <button type="button" id="about-btn" class="ghost-btn foot-link" data-i18n="about">hakkında</button>
   </footer>
 
   <dialog id="about-dlg" class="dlg">
     <article>
       <h3>midpoint</h3>
-      <p>two people, two locations, one fair meeting point.</p>
-      <p>ranking favors places where both people travel about the same time &mdash; then by shortest total.</p>
-      <p>driving estimates via osrm. places via openstreetmap. nothing leaves your browser except requests to those public services.</p>
-      <p class="dlg-foot">no accounts. no tracking. no storage.</p>
-      <form method="dialog"><button class="primary-btn" autofocus>close</button></form>
+      <p data-i18n="about.p1">iki kişi, iki konum, bir adil buluşma noktası.</p>
+      <p data-i18n="about.p2">sıralama, her iki kişinin yaklaşık aynı sürede seyahat ettiği yerleri tercih eder &mdash; sonra toplam süreye göre.</p>
+      <p data-i18n="about.p3">sürüş tahminleri osrm üzerinden, yerler openstreetmap'ten. tarayıcınızdan çıkan tek şey bu genel servislerle yapılan isteklerdir.</p>
+      <p class="dlg-foot" data-i18n="about.foot">hesap yok. takip yok. depolama yok.</p>
+      <form method="dialog"><button class="primary-btn" autofocus data-i18n="about.close">kapat</button></form>
     </article>
   </dialog>
 
   <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin=""></script>
+  <script type="module" src="./js/i18n.js"></script>
   <script type="module" src="./js/app.js"></script>
 </body>
 </html>

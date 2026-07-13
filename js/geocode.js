@@ -11,6 +11,7 @@
 const ENDPOINT = "https://nominatim.openstreetmap.org/search";
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 900;
+const SUGGEST_LIMIT = 6;
 
 // Browser-like headers. Nominatim's edge blocks default fetch UAs from
 // datacenter ranges. Real browsers send these, so we mirror that.
@@ -32,17 +33,20 @@ function makeKey(q) {
 }
 
 /**
- * Geocode a free-text query.
- * Returns { lat, lon, display_name } or throws an Error with .code:
+ * Geocode a free-text query and return up to SUGGEST_LIMIT matches.
+ * Returns an array of { lat, lon, display_name, type, importance } or throws.
+ * Throws an Error with .code:
  *   "ZERO_RESULTS"  -- nothing found
  *   "RATE_LIMITED"  -- gave up after MAX_ATTEMPTS on 429
  *   "NETWORK"       -- network/DNS failure
  */
-export async function geocode(query, { signal } = {}) {
+export async function geocode(query, { signal, limit = SUGGEST_LIMIT } = {}) {
   const key = makeKey(query);
   if (!key) throw makeError("EMPTY_QUERY", "empty query");
 
-  if (cache.has(key)) return cache.get(key);
+  // For a query with cached single result, return it as the only suggestion.
+  const cached = cache.get(key);
+  if (cached) return Array.isArray(cached) ? cached : [cached];
   if (inflight.has(key)) return inflight.get(key);
 
   const promise = (async () => {
@@ -52,8 +56,9 @@ export async function geocode(query, { signal } = {}) {
         const url = new URL(ENDPOINT);
         url.searchParams.set("q", query);
         url.searchParams.set("format", "jsonv2");
-        url.searchParams.set("limit", "1");
+        url.searchParams.set("limit", String(limit));
         url.searchParams.set("addressdetails", "0");
+        url.searchParams.set("dedupe", "1");
 
         const res = await fetch(url, {
           method: "GET",
@@ -80,17 +85,21 @@ export async function geocode(query, { signal } = {}) {
           throw makeError("ZERO_RESULTS", `no results for "${query}"`);
         }
 
-        const hit = data[0];
-        const result = {
-          lat: parseFloat(hit.lat),
-          lon: parseFloat(hit.lon),
-          display_name: hit.display_name,
-        };
-        if (!isFinite(result.lat) || !isFinite(result.lon)) {
-          throw makeError("ZERO_RESULTS", `invalid coords for "${query}"`);
+        const results = data
+          .map((hit) => ({
+            lat: parseFloat(hit.lat),
+            lon: parseFloat(hit.lon),
+            display_name: hit.display_name,
+            type: hit.type || hit.category || "",
+            importance: typeof hit.importance === "number" ? hit.importance : 0,
+          }))
+          .filter((r) => isFinite(r.lat) && isFinite(r.lon));
+
+        if (results.length === 0) {
+          throw makeError("ZERO_RESULTS", `no valid coords for "${query}"`);
         }
-        cache.set(key, result);
-        return result;
+        cache.set(key, results);
+        return results;
       } catch (e) {
         if (e?.name === "AbortError") throw e;
         if (e?.code) throw e; // our own — bail
@@ -107,6 +116,15 @@ export async function geocode(query, { signal } = {}) {
   } finally {
     inflight.delete(key);
   }
+}
+
+/**
+ * Single-result convenience wrapper used when the user clicks a suggestion
+ * (we already have all the data we need at that point).
+ */
+export async function geocodeOne(query, opts = {}) {
+  const results = await geocode(query, { ...opts, limit: 1 });
+  return results[0];
 }
 
 /**
