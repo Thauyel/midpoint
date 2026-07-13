@@ -3,19 +3,18 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=8";
-import { findPlaces } from "./places.js?v=8";
-import { osrmTable } from "./routing.js?v=8";
-import { midpoint, rankByFairness, fmtEta, fmtDist, isFair, haversine, haversineEta } from "./midpoint.js?v=8";
-import { MidpointMap } from "./map.js?v=8";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=8";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=9";
+import { findPlaces, findPlacesAlong } from "./places.js?v=9";
+import { osrmTable } from "./routing.js?v=9";
+import { midpoint, rankByFairness, rankByFairnessFirst, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing } from "./midpoint.js?v=9";
+import { MidpointMap } from "./map.js?v=9";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=9";
 
-const RADIUS_M = 1500;
+const RADIUS_M = 800;            // per-anchor POI search radius
+const MAX_CANDIDATES = 20;       // cap before OSRM call
+const MAX_RESULTS = 12;          // how many to render
 const DEBOUNCE_MS = 350;
 const DEFAULT_CATEGORIES = ["cafe", "restaurant", "bar"];
-// OSRM demo is heavily rate-limited; 12 candidates + 2 sources = 14 coords,
-// small enough to fly through the public demo in a couple of seconds.
-const MAX_CANDIDATES = 12;
 const SUGGEST_MIN_CHARS = 2;
 
 // ----- state -----
@@ -346,10 +345,20 @@ async function runPipeline() {
   const b = state.sides.b.point;
   const mid = midpoint(a, b);
   state.mid = mid;
+  const directM = haversine(a, b);
 
   map.setSide("a", a);
   map.setSide("b", b);
   map.setMidpoint(mid);
+
+  // Draw the "fair zone" circles -- one around each endpoint with radius
+  // equal to directM * 0.5. Their intersection is the area where a truly
+  // fair meeting point could exist.
+  map.clearCircles();
+  const fairRadius = Math.max(800, directM * 0.5);
+  map.drawFairCircle(a, fairRadius, { color: "#7ec8ff", fillOpacity: 0.06 });
+  map.drawFairCircle(b, fairRadius, { color: "#c8a2ff", fillOpacity: 0.06 });
+
   map.drawLine(a, mid, { color: "#7ec8ff", opacity: 0.45 });
   map.drawLine(b, mid, { color: "#c8a2ff", opacity: 0.45 });
   map.fitTo([a, b, mid]);
@@ -357,30 +366,37 @@ async function runPipeline() {
 
   try {
     setHint(t("hint.places"), "");
-    const allPlaces = await findPlaces(mid, [...state.categories], RADIUS_M);
+    // 1.4x the fair zone — slightly generous, since real-world driving
+    // distance is typically 1.2-1.5x the straight line, and a place 10%
+    // outside the strict "fair" ring might still be the best vibe option.
+    const candidateFilterM = fairRadius * 1.4;
+    const anchors = buildAnchors(a, b, directM, fairRadius);
+
+    const allPlaces = await findPlacesAlong(anchors, [...state.categories], RADIUS_M);
     if (allPlaces.length === 0) {
       setHint(t("hint.no_places"), "warn");
       return;
     }
 
-    // Cap and prioritize: keep the N closest-by-haversine candidates so the
-    // OSRM /table call stays small (critical: public demo throttles big
-    // matrices hard).
+    // Drop places whose straight-line distance from BOTH endpoints exceeds
+    // candidateFilterM -- those would never be fair no matter what traffic
+    // does. This is a hard pre-filter before the expensive OSRM call.
     const candidates = allPlaces
-      .map((p) => ({ p, d: haversine(mid, p) }))
-      .sort((x, y) => x.d - y.d)
-      .slice(0, MAX_CANDIDATES)
-      .map(({ p }) => p);
+      .filter((p) => haversine(a, p) <= candidateFilterM && haversine(b, p) <= candidateFilterM)
+      .slice(0, MAX_CANDIDATES);
+
+    if (candidates.length === 0) {
+      setHint(t("hint.no_places"), "warn");
+      return;
+    }
 
     setHint(t("hint.routing"), "");
     let matrix;
-    let osrmOk = false;
     try {
       matrix = await osrmTable(
         [a, b],
         candidates.map((p) => [p.lon, p.lat])
       );
-      osrmOk = !!(matrix?.durations?.[0] && matrix.durations[0].length > 0);
     } catch (e) {
       console.warn("OSRM unavailable, falling back to straight-line ETA:", e?.message || e);
       matrix = null;
@@ -403,7 +419,8 @@ async function runPipeline() {
       };
     });
 
-    const ranked = rankByFairness(enriched).slice(0, 10);
+    // Rank fairness-first: smallest |Δ| wins, total is the tiebreaker.
+    const ranked = rankByFairnessFirst(enriched).slice(0, MAX_RESULTS);
     state.results = ranked;
     renderResults(ranked);
     renderMapPlaces(ranked);
@@ -422,6 +439,53 @@ async function runPipeline() {
     state.finding = false;
     updateFindBtn();
   }
+}
+
+/**
+ * Build the list of search anchors based on how far apart A and B are.
+ *
+ * - Very close (<2km):  just use endpoints + midpoint
+ * - Medium (2-15km):     endpoints + 5 line samples + 1 mid
+ * - Far (>15km):         endpoints + 7 line samples + perpendicular corridor
+ *
+ * The point: for Kadıköy↔Kartal (~14km across the Marmara coast), the
+ * geographic midpoint is in the sea. We MUST search along the line between
+ * them, not just at the midpoint.
+ */
+function buildAnchors(a, b, directM, fairRadius) {
+  const out = [];
+  // Endpoints with a tight radius -- "near A but not at A" is a valid pick
+  out.push(a, b);
+
+  if (directM < 2000) {
+    // Very close: midpoint is enough
+    out.push(midpoint(a, b));
+    return out;
+  }
+
+  const lineSamples = directM < 15000 ? 5 : 7;
+  for (const p of sampleAlongLine(a, b, lineSamples)) {
+    out.push(p);
+    // For longer distances, also sample off the line in case the straight
+    // line passes through a sea/mountain but cafes live on the coast nearby.
+    if (directM >= 5000) {
+      const brg = bearing(a, b);
+      out.push(offsetPoint(p,  Math.min(800, fairRadius * 0.5), brg + 90));
+      out.push(offsetPoint(p, -Math.min(800, fairRadius * 0.5), brg + 90));
+    }
+  }
+
+  // Always include the geographic midpoint too.
+  out.push(midpoint(a, b));
+
+  // Dedupe by ~50m.
+  const seen = [];
+  const deduped = [];
+  for (const p of out) {
+    const dupe = seen.some((q) => haversine(p, q) < 50);
+    if (!dupe) { seen.push(p); deduped.push(p); }
+  }
+  return deduped;
 }
 
 // ============================================================

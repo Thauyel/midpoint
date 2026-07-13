@@ -348,6 +348,42 @@ export function clearCache() {
   cache.clear();
 }
 
+/**
+ * Search for places around MULTIPLE anchor points and return the union.
+ * Deduplicates by ~30m proximity. Used when the two endpoints are far apart
+ * or their geographic midpoint falls in the sea -- we sample anchors along
+ * the line A->B and search around each.
+ *
+ * Returns [{ id, name, lat, lon, category, tags }]. Never throws: errors on
+ * individual anchors are swallowed and we move on.
+ */
+export async function findPlacesAlong(anchors, categories, radiusM = 800, { signal } = {}) {
+  if (!Array.isArray(anchors) || anchors.length === 0) return [];
+  if (!Array.isArray(categories) || categories.length === 0) return [];
+
+  const all = [];
+  const seen = []; // for 30m dedup
+  for (const anchor of anchors) {
+    if (signal?.aborted) return all;
+    try {
+      const places = await findPlaces(anchor, categories, radiusM, { signal });
+      for (const p of places) {
+        const dupe = seen.some((q) =>
+          Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
+        );
+        if (!dupe) {
+          seen.push(p);
+          all.push(p);
+        }
+        if (all.length >= 60) return all; // hard cap
+      }
+    } catch {
+      // one anchor failing shouldn't kill the whole search
+    }
+  }
+  return all;
+}
+
 function makeError(code, message) {
   const e = new Error(message);
   e.code = code;

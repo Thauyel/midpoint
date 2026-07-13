@@ -11,6 +11,13 @@ import {
   fmtDist,
   rankByFairness,
   isFair,
+  haversineEta,
+  lerpLatLon,
+  sampleAlongLine,
+  searchAnchors,
+  bearing,
+  offsetPoint,
+  corridorAnchors,
 } from "../js/midpoint.js";
 
 let passed = 0;
@@ -163,6 +170,93 @@ test("isFair true for |Δ| <= 5min", () => {
 
 test("isFair false for |Δ| > 5min", () => {
   if (isFair({ eta_a_s: 600, eta_b_s: 901 })) throw new Error("301s Δ should be unfair");
+});
+
+console.log("\n== sampling helpers ==");
+
+test("lerpLatLon midpoint at t=0.5", () => {
+  const a = { lat: 40.992, lon: 29.025 };
+  const b = { lat: 40.888, lon: 29.184 };
+  const m = lerpLatLon(a, b, 0.5);
+  if (Math.abs(m.lat - 40.940) > 0.001) throw new Error(`lat off: ${m.lat}`);
+  if (Math.abs(m.lon - 29.1045) > 0.001) throw new Error(`lon off: ${m.lon}`);
+});
+
+test("sampleAlongLine returns n points strictly inside (0,1)", () => {
+  const a = { lat: 0, lon: 0 };
+  const b = { lat: 10, lon: 10 };
+  const pts = sampleAlongLine(a, b, 5);
+  if (pts.length !== 5) throw new Error(`expected 5, got ${pts.length}`);
+  for (const p of pts) {
+    if (p.lat < 0 || p.lat > 10) throw new Error(`lat out of range: ${p.lat}`);
+    if (p.lon < 0 || p.lon > 10) throw new Error(`lon out of range: ${p.lon}`);
+  }
+});
+
+test("searchAnchors dedupes points within 50m", () => {
+  const a = { lat: 40.992, lon: 29.025 };
+  const b = { lat: 40.888, lon: 29.184 };
+  const anchors = searchAnchors(a, b, 5);
+  if (anchors.length > 8) throw new Error(`too many anchors: ${anchors.length}`);
+  for (let i = 0; i < anchors.length; i++) {
+    for (let j = i+1; j < anchors.length; j++) {
+      if (haversine(anchors[i], anchors[j]) < 50) {
+        throw new Error(`anchors ${i},${j} too close: ${haversine(anchors[i], anchors[j])}m`);
+      }
+    }
+  }
+});
+
+test("bearing is 0 between two points due north", () => {
+  const a = { lat: 40, lon: 29 };
+  const b = { lat: 41, lon: 29 };
+  const brg = bearing(a, b);
+  if (Math.abs(brg - 0) > 1) throw new Error(`expected ~0°, got ${brg}`);
+});
+
+test("bearing is 90 between two points due east", () => {
+  const a = { lat: 40, lon: 29 };
+  const b = { lat: 40, lon: 30 };
+  const brg = bearing(a, b);
+  if (Math.abs(brg - 90) > 1) throw new Error(`expected ~90°, got ${brg}`);
+});
+
+test("offsetPoint round-trips bearing+distance", () => {
+  const a = { lat: 40, lon: 29 };
+  const b = offsetPoint(a, 1000, 0);
+  if (Math.abs(b.lat - 40.009) > 0.002) throw new Error(`lat off: ${b.lat}`);
+  if (Math.abs(b.lon - 29) > 0.001) throw new Error(`lon off: ${b.lon}`);
+});
+
+test("corridorAnchors produces 2n points", () => {
+  const a = { lat: 40.992, lon: 29.025 };
+  const b = { lat: 40.888, lon: 29.184 };
+  const c = corridorAnchors(a, b, 5, 600);
+  if (c.length !== 10) throw new Error(`expected 10, got ${c.length}`);
+});
+
+console.log("\n== haversineEta ==");
+
+test("haversineEta returns seconds scaled by speed", () => {
+  const eta = haversineEta(1000);
+  if (Math.abs(eta - 120) > 1) throw new Error(`expected ~120, got ${eta}`);
+});
+
+test("haversineEta floors at MIN_ETA_S for tiny distances", () => {
+  const eta = haversineEta(10);
+  if (eta !== 90) throw new Error(`expected 90, got ${eta}`);
+});
+
+console.log("\n== ranking ==");
+
+test("rankByFairness prefers small |Δ| when totals are equal", () => {
+  const a = { eta_a_s: 900, eta_b_s: 900 };
+  const b = { eta_a_s: 800, eta_b_s: 1000 };
+  const ranked = rankByFairness([b, a]);
+  // rankByFairness returns new objects (spread) so compare eta fields
+  if (ranked[0].eta_a_s !== 900 || ranked[0].eta_b_s !== 900) {
+    throw new Error(`expected a first, got ${JSON.stringify(ranked[0])}`);
+  }
 });
 
 console.log(`\nResults: ${passed} passed, ${failed} failed`);

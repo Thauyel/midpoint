@@ -93,6 +93,32 @@ export class MidpointMap {
     this.lines = [];
   }
 
+  clearCircles() {
+    if (this.circles) {
+      for (const c of this.circles) this.map.removeLayer(c);
+    }
+    this.circles = [];
+  }
+
+  /**
+   * Draw a translucent circle around `center` with `radiusM` metres.
+   * Used to visualise each person's "fair zone" so the user can see
+   * why certain meeting points are possible and others aren't.
+   */
+  drawFairCircle(center, radiusM, opts = {}) {
+    if (!this.circles) this.circles = [];
+    const circle = L.circle([center.lat, center.lon], {
+      radius: radiusM,
+      color: opts.color || "#f5b5c5",
+      weight: 1,
+      fillColor: opts.fillColor || opts.color || "#f5b5c5",
+      fillOpacity: opts.fillOpacity ?? 0.06,
+      interactive: false,
+    }).addTo(this.map);
+    this.circles.push(circle);
+    return circle;
+  }
+
   drawLine(a, b, opts = {}) {
     const line = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
       color: opts.color || "#f5b5c5",

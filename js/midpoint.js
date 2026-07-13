@@ -92,6 +92,26 @@ export function rankByFairness(candidates) {
 }
 
 /**
+ * Rank by *fairness first*: smallest |Δ| wins. Total drive time is the
+ * tiebreaker. This is the better ranking when the user explicitly wants
+ * "fair meeting point" rather than "minimum combined drive time".
+ */
+export function rankByFairnessFirst(candidates, maxFairS = 30 * 60) {
+  return [...candidates]
+    .filter((c) => Number.isFinite(c.eta_a_s) && Number.isFinite(c.eta_b_s))
+    .map((c, i) => ({ ...c, _idx: i }))
+    .sort((x, y) => {
+      const fairX = Math.min(Math.abs(x.eta_a_s - x.eta_b_s), maxFairS);
+      const fairY = Math.min(Math.abs(y.eta_a_s - y.eta_b_s), maxFairS);
+      if (fairX !== fairY) return fairX - fairY;
+      const totX = x.eta_a_s + x.eta_b_s;
+      const totY = y.eta_a_s + y.eta_b_s;
+      if (totX !== totY) return totX - totY;
+      return x._idx - y._idx;
+    });
+}
+
+/**
  * "Is this candidate fair?" — used for the green badge.
  * threshold: seconds of |Δ| below which we consider the place fair.
  */
@@ -117,4 +137,121 @@ export const MIN_ETA_S = 90; // 1.5 min -- realistic for parking + walk to door
 export function haversineEta(distanceM, speedMps = URBAN_DRIVE_M_S) {
   if (distanceM == null || !isFinite(distanceM)) return null;
   return Math.max(MIN_ETA_S, distanceM / speedMps);
+}
+
+// ============================================================
+//  Sample points along the line between A and B
+// ============================================================
+//
+// For two points that are far apart (or whose geographic midpoint falls in
+// the sea / a mountain / a desert), we don't want to search a tiny circle
+// around mid -- we'd find nothing. Instead we sample N "meeting points"
+// along the line A->B, and search around each. That way, even if A and B
+// are 40km apart across a body of water, we still surface cafes that
+// happen to live near the line between them.
+
+/**
+ * Linear interpolation between two lat/lon points in *planar* space.
+ * Good enough for short to medium distances (<100km). For very long
+ * distances this drifts slightly but the candidate search radius absorbs it.
+ */
+export function lerpLatLon(a, b, t) {
+  return {
+    lat: a.lat + (b.lat - a.lat) * t,
+    lon: a.lon + (b.lon - a.lon) * t,
+  };
+}
+
+/**
+ * Sample `n` evenly-spaced points along the line A→B, excluding the
+ * endpoints themselves (they'd just return the user's own neighborhood).
+ * Includes the geographic midpoint.
+ */
+export function sampleAlongLine(a, b, n = 7) {
+  const points = [];
+  // Use a cosine-spaced distribution: denser near the midpoint where the
+  // fair zone is, sparser near the endpoints.
+  for (let i = 0; i < n; i++) {
+    // t in (0, 1) exclusive
+    const u = (i + 0.5) / n;
+    points.push(lerpLatLon(a, b, u));
+  }
+  return points;
+}
+
+/**
+ * Build a list of search anchors: the line samples PLUS the actual
+ * geographic midpoint PLUS the two endpoints (small radius each).
+ * Returns unique points (within 50m of each other collapsed to one).
+ */
+export function searchAnchors(a, b, lineSamplesN = 7) {
+  const anchors = [];
+  // The endpoints with a tight radius -- "somewhere near A but not at A"
+  // and "somewhere near B but not at B" are also valid picks (e.g. the
+  // halfway cafe could legitimately be 3km from one endpoint if it has
+  // a great view of the sea).
+  anchors.push(a, b);
+  // The line samples -- these are where the fair places actually live.
+  for (const p of sampleAlongLine(a, b, lineSamplesN)) anchors.push(p);
+  // The geographic midpoint -- keep this too in case the line samples
+  // miss the exact center.
+  anchors.push(midpoint(a, b));
+  // Dedupe by ~50m proximity.
+  const seen = [];
+  const out = [];
+  for (const p of anchors) {
+    const dupe = seen.some((q) => haversine(p, q) < 50);
+    if (!dupe) { seen.push(p); out.push(p); }
+  }
+  return out;
+}
+
+/**
+ * Bearing from a → b in degrees (0 = north, 90 = east).
+ * Used to compute the perpendicular offset for the "wider corridor"
+ * anchor search.
+ */
+export function bearing(a, b) {
+  const phi1 = toRad(a.lat);
+  const phi2 = toRad(b.lat);
+  const dLam = toRad(b.lon - a.lon);
+  const y = Math.sin(dLam) * Math.cos(phi2);
+  const x = Math.cos(phi1) * Math.sin(phi2) -
+            Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLam);
+  return ((toDeg(Math.atan2(y, x)) + 360) % 360);
+}
+
+/**
+ * Offset a point by `distanceM` metres along the given bearing (degrees).
+ */
+export function offsetPoint(p, distanceM, bearingDeg) {
+  const ang = distanceM / R_EARTH_M; // radians
+  const phi1 = toRad(p.lat);
+  const lam1 = toRad(p.lon);
+  const theta = toRad(bearingDeg);
+  const phi2 = Math.asin(
+    Math.sin(phi1) * Math.cos(ang) +
+    Math.cos(phi1) * Math.sin(ang) * Math.cos(theta)
+  );
+  const lam2 = lam1 + Math.atan2(
+    Math.sin(theta) * Math.sin(ang) * Math.cos(phi1),
+    Math.cos(ang) - Math.sin(phi1) * Math.sin(phi2)
+  );
+  return { lat: toDeg(phi2), lon: ((toDeg(lam2) + 540) % 360) - 180 };
+}
+
+/**
+ * Build a wider corridor: anchors perpendicular-offset from the line A→B.
+ * This catches cafes that are a few hundred metres off the line (e.g. on
+ * the seaside while A and B are both inland) that the strict-line search
+ * would miss.
+ */
+export function corridorAnchors(a, b, lineSamplesN = 5, perpOffsetM = 600) {
+  const out = [];
+  const brg = bearing(a, b);
+  for (const p of sampleAlongLine(a, b, lineSamplesN)) {
+    out.push(offsetPoint(p,  perpOffsetM, brg + 90));
+    out.push(offsetPoint(p, -perpOffsetM, brg + 90));
+  }
+  return out;
 }

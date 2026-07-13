@@ -1,0 +1,3 @@
+// Add category SVGs here if you want custom icons.
+// Currently the map uses single-letter glyphs (c/r/b/p) baked into map.js.
+// Empty placeholder kept so the folder is tracked by git.
