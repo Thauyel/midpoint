@@ -157,11 +157,10 @@ async function nominatimPoiSearch(mid, categories, radiusM, signal) {
   const results = [];
   const seen = new Set();
 
-  // Fire all category queries for this anchor IN PARALLEL. Nominatim's
-  // 1-req-per-second limit is per-source-IP and we typically issue 3-6
-  // queries per anchor; if Nominatim 429s us, we'll just retry that one
-  // query with a 1.1s backoff. In practice the public endpoint is
-  // forgiving enough for 5-6 concurrent queries from a Vercel edge IP.
+  // Browsers cap concurrent requests per origin at ~6. Nominatim is the
+  // origin for all of these queries, so firing 6+ in parallel can cause
+  // some to be queued/cancelled. We process at most 3 at once.
+  const PARALLEL = 3;
   const tasks = queries.map(async (q) => {
     if (signal?.aborted) return [];
     const url = new URL(NOMINATIM_ENDPOINT);
@@ -180,7 +179,6 @@ async function nominatimPoiSearch(mid, categories, radiusM, signal) {
         signal,
       });
       if (res.status === 429) {
-        // one quick retry after the rate-limit window
         await sleep(1100);
         res = await fetch(url, {
           headers: { ...BROWSER_HEADERS, "Accept": "application/json" },
@@ -203,7 +201,13 @@ async function nominatimPoiSearch(mid, categories, radiusM, signal) {
     }
   });
 
-  const allHits = (await Promise.all(tasks)).flat();
+  // Run in chunks of PARALLEL to avoid hitting browser concurrent-request caps.
+  const allHits = [];
+  for (let i = 0; i < tasks.length; i += PARALLEL) {
+    if (signal?.aborted) break;
+    const chunk = await Promise.all(tasks.slice(i, i + PARALLEL));
+    allHits.push(...chunk.flat());
+  }
   for (const { name, lat, lon, hit } of allHits) {
     const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
     if (seen.has(key)) continue;
@@ -397,14 +401,27 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
 
   const all = [];
   const seen = []; // for ~30m dedup
-  for (const anchor of anchors) {
-    if (signal?.aborted) return all;
-    // Per-anchor timeout so a slow anchor doesn't drag out the whole search.
+  const POOL = 3;  // max concurrent anchors
+  let cursor = 0;
+
+  async function processAnchor(anchor) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), ANCHOR_TIMEOUT_MS);
     try {
       const places = await nominatimPoiSearch(anchor, categories, radiusM, ctl.signal);
       clearTimeout(timer);
+      return places;
+    } catch {
+      clearTimeout(timer);
+      return [];
+    }
+  }
+
+  async function worker() {
+    while (cursor < anchors.length) {
+      const idx = cursor++;
+      if (signal?.aborted) return;
+      const places = await processAnchor(anchors[idx]);
       for (const p of places) {
         const dupe = seen.some((q) =>
           Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
@@ -413,13 +430,12 @@ export async function findPlacesAlong(anchors, categories, radiusM = 800, { sign
           seen.push(p);
           all.push(p);
         }
-        if (all.length >= 60) return all; // hard cap
+        if (all.length >= 60) return;
       }
-    } catch {
-      clearTimeout(timer);
-      // one anchor failing shouldn't kill the whole search
     }
   }
+
+  await Promise.all(Array.from({ length: Math.min(POOL, anchors.length) }, worker));
   return all;
 }
 
