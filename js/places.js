@@ -171,6 +171,10 @@ async function photonPoiSearch(mid, categories, radiusM, signal) {
   url.searchParams.set("q", q || "cafe restaurant bar park");
   url.searchParams.set("lat", String(mid.lat));
   url.searchParams.set("lon", String(mid.lon));
+  // Photon's `location_bias_scale` parameter biases the search around
+  // lat/lon -- default is 0.2 which can pull results from hundreds of
+  // km away. Set to 0.1 to keep results local to the endpoint.
+  url.searchParams.set("location_bias_scale", "0.1");
   url.searchParams.set("limit", "30");
   url.searchParams.set("zoom", "15");
   // Photon supports one osm_tag. If we have a single category, use it as
