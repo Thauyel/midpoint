@@ -1,0 +1,13 @@
+{
+  "name": "midpoint",
+  "version": "1.0.0",
+  "description": "Two places, one fair meeting point. Static SPA — no build step.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node tests/test_midpoint.mjs",
+    "smoke": "node tests/smoke_live.mjs"
+  },
+  "license": "MIT",
+  "author": "Atacan Küçüksarı"
+}

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="description" content="Find a fair meeting point between two locations. Cafe, restaurant, bar, or park — ranked by equal travel time." />
+  <title>midpoint — find where to meet</title>
+
+  <link rel="preconnect" href="https://nominatim.openstreetmap.org" />
+  <link rel="preconnect" href="https://overpass-api.de" />
+  <link rel="preconnect" href="https://router.project-osrm.org" />
+  <link rel="preconnect" href="https://tile.openstreetmap.org" crossorigin />
+
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="" />
+
+  <link rel="stylesheet" href="./css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%23000' stroke='%23f5b5c5' stroke-width='3'/%3E%3Ccircle cx='20' cy='32' r='4' fill='%23f5b5c5'/%3E%3Ccircle cx='44' cy='32' r='4' fill='%23f5b5c5'/%3E%3Cpath d='M20 32 L44 32' stroke='%23f5b5c5' stroke-width='2' stroke-dasharray='3 3'/%3E%3C/svg%3E" />
+</head>
+<body>
+
+  <header class="topbar">
+    <h1 class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-text">midpoint</span>
+    </h1>
+    <p class="tagline">two places &middot; one fair meeting point</p>
+  </header>
+
+  <main class="app">
+
+    <section class="card pair" aria-label="Locations">
+      <article class="loc loc-a" data-side="a">
+        <header class="loc-head">
+          <span class="dot dot-a" aria-hidden="true"></span>
+          <label class="loc-label" for="input-a">Person A</label>
+          <button type="button" class="ghost-btn locate-btn" data-side="a" title="Use my location">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+            <span>locate me</span>
+          </button>
+        </header>
+        <input id="input-a" type="text" class="loc-input"
+               placeholder="address, place, or city…" autocomplete="off"
+               spellcheck="false" />
+        <div class="loc-meta" data-meta="a" aria-live="polite"></div>
+      </article>
+
+      <div class="pair-divider" aria-hidden="true">
+        <span class="pair-x">&times;</span>
+      </div>
+
+      <article class="loc loc-b" data-side="b">
+        <header class="loc-head">
+          <span class="dot dot-b" aria-hidden="true"></span>
+          <label class="loc-label" for="input-b">Person B</label>
+          <button type="button" class="ghost-btn locate-btn" data-side="b" title="Use my location">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+            <span>locate me</span>
+          </button>
+        </header>
+        <input id="input-b" type="text" class="loc-input"
+               placeholder="address, place, or city…" autocomplete="off"
+               spellcheck="false" />
+        <div class="loc-meta" data-meta="b" aria-live="polite"></div>
+      </article>
+    </section>
+
+    <section class="card cats" aria-label="Place categories">
+      <span class="cats-label">what kind of place?</span>
+      <div class="cat-chips" role="group" aria-label="Category filters">
+        <button type="button" class="chip is-on" data-cat="cafe"    aria-pressed="true">cafe</button>
+        <button type="button" class="chip is-on" data-cat="restaurant" aria-pressed="true">restaurant</button>
+        <button type="button" class="chip is-on" data-cat="bar"     aria-pressed="true">bar</button>
+        <button type="button" class="chip"        data-cat="park"    aria-pressed="false">park</button>
+        <button type="button" class="chip"        data-cat="generic" aria-pressed="false">any</button>
+      </div>
+    </section>
+
+    <section class="card action" aria-label="Find midpoint">
+      <button id="find-btn" type="button" class="primary-btn" disabled>
+        <span class="btn-text">find midpoint</span>
+        <span class="btn-spinner" aria-hidden="true"></span>
+      </button>
+      <p class="hint" id="hint">enter two places to begin.</p>
+    </section>
+
+    <section class="map-wrap" aria-label="Map">
+      <div id="map" class="map" role="application" aria-label="Meeting point map"></div>
+    </section>
+
+    <section class="results" id="results" aria-label="Recommended places" hidden>
+      <header class="results-head">
+        <h2>best spots nearby</h2>
+        <span class="results-sub" id="results-sub"></span>
+      </header>
+      <ol class="result-list" id="result-list"></ol>
+    </section>
+
+  </main>
+
+  <footer class="footbar">
+    <span class="foot-quiet">data &middot; openstreetmap &middot; osrm &middot; overpass</span>
+    <button type="button" id="about-btn" class="ghost-btn foot-link">about</button>
+  </footer>
+
+  <dialog id="about-dlg" class="dlg">
+    <article>
+      <h3>midpoint</h3>
+      <p>two people, two locations, one fair meeting point.</p>
+      <p>ranking favors places where both people travel about the same time &mdash; then by shortest total.</p>
+      <p>driving estimates via osrm. places via openstreetmap. nothing leaves your browser except requests to those public services.</p>
+      <p class="dlg-foot">no accounts. no tracking. no storage.</p>
+      <form method="dialog"><button class="primary-btn" autofocus>close</button></form>
+    </article>
+  </dialog>
+
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
