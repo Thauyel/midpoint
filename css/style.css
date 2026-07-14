@@ -484,6 +484,19 @@ body {
   border-color: #fff;
   box-shadow: 0 0 0 2px var(--accent), 0 6px 18px rgba(245,181,197,.4);
 }
+/* Sticky "click-selected" highlight on a pin. Matches the matching
+   row's .result.is-selected so both views emphasise the same item. */
+.place-marker.is-selected {
+  transform: scale(1.35);
+  background: var(--accent);
+  color: var(--bg);
+  border-color: #fff;
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 0 5px rgba(245, 181, 197, .35),
+    0 8px 22px rgba(245, 181, 197, .55);
+  z-index: 1000;
+}
 
 /* ---------- results ---------- */
 .results {
@@ -584,6 +597,15 @@ body {
 .result.is-top {
   border-color: var(--accent-dim);
   background: linear-gradient(180deg, rgba(245,181,197,.06), var(--bg-card));
+}
+/* Sticky "click-selected" highlight on a row. Triggered when the user
+   clicks a pin on the map (or the row itself). Persists until cleared
+   by another selection or a new search. */
+.result.is-selected {
+  border-color: var(--accent);
+  background: rgba(245, 181, 197, .08);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .result-rank {
   font-family: var(--mono);

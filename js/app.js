@@ -5,9 +5,9 @@
 //  v4: pure circle-from-midpoint algorithm. One anchor, expanding radius.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=40";
-import { findPlacesInCircle, findPlacesAlways } from "./places.js?v=40";
-import { osrmTable } from "./routing.js?v=40";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=41";
+import { findPlacesInCircle, findPlacesAlways } from "./places.js?v=41";
+import { osrmTable } from "./routing.js?v=41";
 import {
   midpoint,
   rankByCircleDistance,
@@ -21,9 +21,9 @@ import {
   baseRadiusFor,
   expandSteps,
   circleRadiusFor,
-} from "./midpoint.js?v=40";
-import { MidpointMap } from "./map.js?v=40";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=40";
+} from "./midpoint.js?v=41";
+import { MidpointMap } from "./map.js?v=41";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=41";
 
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
 const MAX_RESULTS = 10;          // how many to render
@@ -49,6 +49,7 @@ const state = {
   searchRadius: null,   // radius (metres) of the circle we searched, for re-sorting
   shareOn: false,
   suggestFocus: null,  // { side, idx } for arrow-key nav
+  selectedIdx: null,    // row/pin index currently highlighted (from click)
 };
 
 // ----- dom -----
@@ -419,11 +420,13 @@ async function runPipeline() {
 
   state.finding = true;
   state.results = [];
+  state.selectedIdx = null;     // clear any stale selection from a prior search
   els.results.hidden = true;
   els.resultList.innerHTML = "";
   map.clearPlaces();
   map.clearLines();
   map.clearCircles();
+  map.focusPlaceClear();
   updateFindBtn();
 
   const a = state.sides.a.point;
@@ -621,16 +624,18 @@ function renderResults(ranked) {
     li.addEventListener("blur", () => map.focusPlace(i, false));
 
     li.addEventListener("click", (e) => {
-      // Don't trigger when clicking the map links
+      // Don't trigger when clicking the map links (they open external nav).
       if (e.target.closest(".map-link")) return;
+      // Same code path as clicking the pin: highlight in both views and
+      // pan the map so the pin is centred.
+      selectPlace(i);
       map.flyTo({ lat: r.lat, lon: r.lon }, 16);
-      document.querySelectorAll(".place-marker").forEach((m) => m.classList.remove("is-top", "is-pulse"));
       const m = map.markers.places[i];
       if (m && m.getElement) {
         const el = m.getElement();
         const inner = el.querySelector(".place-marker");
         if (inner) {
-          inner.classList.add("is-top", "is-pulse");
+          inner.classList.add("is-pulse");
           setTimeout(() => inner.classList.remove("is-pulse"), 1200);
         }
       }
@@ -651,7 +656,29 @@ function mapsDeepLink(lat, lon, name) {
 
 function renderMapPlaces(ranked) {
   map.clearPlaces();
-  ranked.forEach((r, i) => map.addPlace(r, i, { isTop: i === 0 }));
+  ranked.forEach((r, i) =>
+    map.addPlace(r, i, {
+      isTop: i === 0,
+      onClick: (idx) => selectPlace(idx),
+    })
+  );
+}
+
+// Click a pin on the map -> highlight the matching list row (and scroll
+// it into view). Clicking the same pin again, or clicking any other pin
+// or row, moves the highlight. Clicking outside clears it.
+function selectPlace(idx) {
+  // Clear previous highlights in both views.
+  for (const li of els.resultList.children) li.classList.remove("is-selected");
+  map.focusPlaceClear();
+  // Persist which row is selected so the row stays emphasised until cleared.
+  state.selectedIdx = idx;
+  const li = els.resultList.children[idx];
+  if (!li) return;
+  li.classList.add("is-selected");
+  li.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  // Also pulse the matching pin so the user sees the reverse highlight.
+  map.focusPlacePin(idx, true);
 }
 
 function escapeHtml(s) {
@@ -729,6 +756,11 @@ sortTabs.forEach((tab) => {
       t.setAttribute("aria-selected", active ? "true" : "false");
     });
     if (!state.allCandidates.length || !state.mid) return;
+    // Re-sorting reorders the candidates, so a previously selected
+    // row/pin index would point at the wrong place. Clear and let the
+    // user re-select if they want.
+    state.selectedIdx = null;
+    map.focusPlaceClear();
     const ranked = applySort(
       state.allCandidates,
       state.sortMode,

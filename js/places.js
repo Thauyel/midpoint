@@ -6,7 +6,7 @@
 //  source (CORS-friendly, no rate limit). Nominatim is the fallback.
 // ============================================================
 
-import { expandSteps } from "./midpoint.js?v=40";
+import { expandSteps } from "./midpoint.js?v=41";
 
 // Browser-like headers. Overpass-API.de and other OSM endpoints on the public
 // internet are aggressive about User-Agent / Origin / Referer. Real browsers

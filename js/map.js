@@ -91,6 +91,28 @@ export class MidpointMap {
     inner.classList.toggle("is-hover", !!on);
   }
 
+  /**
+   * Sticky "selected from click" highlight on a place marker. Unlike
+   * `focusPlace` (which is hover-driven), this persists until cleared
+   * via `focusPlaceClear`. Used when the user clicks a pin and we want
+   * the matching list row to stay emphasised.
+   */
+  focusPlacePin(idx, on) {
+    const m = this.markers.places[idx];
+    if (!m || !m.getElement) return;
+    const inner = m.getElement().querySelector(".place-marker");
+    if (!inner) return;
+    inner.classList.toggle("is-selected", !!on);
+  }
+
+  focusPlaceClear() {
+    for (const m of this.markers.places) {
+      if (!m || !m.getElement) continue;
+      const inner = m.getElement().querySelector(".place-marker");
+      if (inner) inner.classList.remove("is-selected", "is-hover", "is-pulse");
+    }
+  }
+
   addPlace(place, idx, opts = {}) {
     const isTop = !!opts.isTop;
     const glyph = PLACE_GLYPH[place.category] || "·";
@@ -102,6 +124,12 @@ export class MidpointMap {
         { direction: "top", offset: [0, -10], opacity: 0.95 }
       )
       .addTo(this.map);
+    // Wire the click → callback path so app.js can highlight the list row.
+    // Clicking a pin on the map now does the same thing as clicking the
+    // list row: highlight the pair in both views.
+    if (typeof opts.onClick === "function") {
+      m.on("click", () => opts.onClick(idx));
+    }
     this.markers.places.push(m);
     return m;
   }
