@@ -137,6 +137,29 @@ export class MidpointMap {
     return circle;
   }
 
+  /**
+   * Draw (or redraw) the v4 "circle from the midpoint" — the single
+   * circle whose contents the algorithm is searching. `midRadiusM` is
+   * the radius in metres. We clear any prior mid-circles first so
+   * each redraw replaces the previous one cleanly.
+   */
+  drawMidCircle(center, midRadiusM, opts = {}) {
+    if (!this.midCircles) this.midCircles = [];
+    for (const c of this.midCircles) this.map.removeLayer(c);
+    this.midCircles = [];
+    const circle = L.circle([center.lat, center.lon], {
+      radius: midRadiusM,
+      color: opts.color || "#f5b5c5",
+      weight: 2,
+      fillColor: opts.fillColor || opts.color || "#f5b5c5",
+      fillOpacity: opts.fillOpacity ?? 0.04,
+      dashArray: opts.dashArray || "6 8",
+      interactive: false,
+    }).addTo(this.map);
+    this.midCircles.push(circle);
+    return circle;
+  }
+
   drawLine(a, b, opts = {}) {
     const line = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
       color: opts.color || "#f5b5c5",

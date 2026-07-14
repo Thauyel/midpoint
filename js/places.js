@@ -1,14 +1,12 @@
 // ============================================================
-//  places.js  --  Overpass API wrapper
+//  places.js  --  POI search around a single midpoint circle
 //
-//  Query the OSM "around" pattern with `out tags` so we get
-//  the human name without paying for geometry. Bounded by
-//  radius_m, capped at 30 raw hits per call.
-//
-//  Multi-endpoint with automatic failover (overpass-api.de is
-//  the canonical public one; overpass.kumi.systems is the
-//  mirror that's often faster / less loaded).
+//  v4: clean circle-from-midpoint algorithm. One circle, one radius,
+//  progressive expansion if too few places found. Photon is the primary
+//  source (CORS-friendly, no rate limit). Nominatim is the fallback.
 // ============================================================
+
+import { expandSteps } from "./midpoint.js?v=39";
 
 // Browser-like headers. Overpass-API.de and other OSM endpoints on the public
 // internet are aggressive about User-Agent / Origin / Referer. Real browsers
@@ -38,9 +36,6 @@ const BASE_BACKOFF_MS = 600;
 // pathologically slow (30s+ before any response) -- we'd rather fail fast
 // and try the next mirror.
 const ENDPOINT_TIMEOUT_MS = 8000;
-// Per-anchor timeout (ms) for the multi-anchor Nominatim search. With 8
-// anchors and a 5s budget each, the worst-case POI scan completes in 40s.
-const ANCHOR_TIMEOUT_MS = 5000;
 
 const cache = new Map();
 const inflight = new Map();
@@ -492,206 +487,83 @@ export function clearCache() {
   cache.clear();
 }
 
-/**
- * Search for places around MULTIPLE anchor points and return the union.
- * Deduplicates by ~30m proximity. Used when the two endpoints are far apart
- * or their geographic midpoint falls in the sea -- we sample anchors along
- * the line A->B and search around each.
- *
- * Internally: each anchor is queried via the Photon geocoder (with
- * Nominatim as fallback). See the long comment on findPlaces() above
- * for why we don't use Overpass here.
- *
- * Each anchor may carry a `._r` field for a per-anchor search radius
- * (used by expandingAnchors). Default radius is the function argument.
- *
- * Returns [{ id, name, lat, lon, category, tags }]. Never throws: errors on
- * individual anchors are swallowed and we move on.
- */
-export async function findPlacesAlong(anchors, categories, radiusM = 800, { signal } = {}) {
-  if (!Array.isArray(anchors) || anchors.length === 0) return [];
-  if (!Array.isArray(categories) || categories.length === 0) return [];
-
-  const all = [];
-  const seen = []; // for ~30m dedup
-  const POOL = 3;  // max concurrent anchors
-  let cursor = 0;
-
-  async function processAnchor(anchor) {
-    const r = (typeof anchor._r === "number" && anchor._r > 0) ? anchor._r : radiusM;
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), ANCHOR_TIMEOUT_MS);
-    try {
-      // Photon first -- fast and rate-limit free.
-      let places = await photonPoiSearch(anchor, categories, r, ctl.signal);
-      // If Photon returns nothing, fall back to Nominatim.
-      if (places.length === 0) {
-        places = await nominatimPoiSearch(anchor, categories, r, ctl.signal);
-      }
-      clearTimeout(timer);
-      return places;
-    } catch {
-      clearTimeout(timer);
-      return [];
-    }
-  }
-
-  async function worker() {
-    while (cursor < anchors.length) {
-      const idx = cursor++;
-      if (signal?.aborted) return;
-      const places = await processAnchor(anchors[idx]);
-      for (const p of places) {
-        const dupe = seen.some((q) =>
-          Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
-        );
-        if (!dupe) {
-          seen.push(p);
-          all.push(p);
-        }
-        if (all.length >= 60) return;
-      }
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(POOL, anchors.length) }, worker));
-  return all;
-}
+// ---------- v4: single-circle POI search ----------
+//
+// The user requested a clean, simple algorithm:
+//   "from the actual midpoint extend a circle and after some point
+//    find places and tell the relative time to both points."
+//
+// We support it with a thin wrapper around Photon/Nominatim that takes
+// ONE anchor (the midpoint) and ONE radius, queries POIs in that circle,
+// and returns them. The "expansion" logic (retry with bigger radius if
+// too few results) lives in `findPlacesAlways` below -- the underlying
+// search itself stays single-circle, single-radius.
 
 /**
- * "Always suggest something" wrapper. Runs findPlacesAlong with the given
- * anchor set; if it returns 0 results, retries with anchors that have a
- * progressively larger search radius. Keeps widening until we get at
- * least MIN_RESULTS hits OR we hit MAX_RADIUS_M. Guarantees the caller
- * never gets an empty list (unless every photon + nominatim endpoint is
- * down, in which case the underlying findPlacesAlong returns []).
- *
- * `mid` is the geographic midpoint (the place to start expanding around
- * if the smart anchors fail). We seed the expansion with the ORIGINAL
- * anchors at the first attempt so we don't burn cycles widening before
- * the line search has had a chance.
+ * Query POIs in a single circle around `mid` with radius `radiusM`.
+ * Returns [{ id, name, lat, lon, category, tags }] deduplicated by ~30m.
+ * Tries Photon first (fast, CORS-friendly), Nominatim as fallback.
+ * `signal` is an AbortSignal to cancel in-flight requests.
  */
-export async function findPlacesAlways(initialAnchors, categories, mid, {
-  signal, minResults = 5, startRadiusM = 1500, stepM = 1500, maxRadiusM = 9000,
-  bboxA = null, bboxB = null,
-} = {}) {
-  // We always run the smart corridor search AND a bbox-grid safety net
-  // IN PARALLEL. The corridor is the fast path; the grid is the
-  // guaranteed-results safety net. We merge results from both as they
-  // come in and return as soon as we hit `minResults` -- so the typical
-  // case (corridor finds cafes) finishes in ~1-2 seconds even when the
-  // grid is also running. The pathological case (corridor returns 0)
-  // still completes in grid-time (~5-15 seconds for a 50km line).
-  const tasks = [];
-
-  // Task 1: smart corridor + line samples at length-aware radius.
-  tasks.push((async () => {
-    const out = await findPlacesAlong(initialAnchors, categories, startRadiusM, { signal });
-    return { source: "corridor", places: out };
-  })());
-
-  // Task 2: expanding-radius around the geographic midpoint (gracefully
-  // widens if corridor returns little).
-  tasks.push((async () => {
-    const out = [];
-    const radii = [];
-    for (let r = startRadiusM; r <= maxRadiusM; r += Math.max(stepM, 500)) {
-      radii.push(r);
-      if (radii.length >= 6) break; // safety cap
-    }
-    for (const r of radii) {
-      if (signal?.aborted) break;
-      const more = await findPlacesAlong(
-        [{ ...mid, _r: r }],
-        categories,
-        r,
-        { signal },
-      );
-      out.push(...more);
-      if (out.length >= minResults * 2) break;
-    }
-    return { source: "expanding", places: out };
-  })());
-
-  // Task 3: bbox-grid safety net. Splits the A↔B bounding box into 9
-  // cells and searches each one with a generous radius. Statistically
-  // impossible to miss popular places for any reasonable user input.
-  if (bboxA && bboxB) {
-    tasks.push((async () => {
-      const out = [];
-      const grid = makeBboxGrid(bboxA, bboxB, 3, 3);
-      const cellRadius = Math.max(6000, maxRadiusM * 0.6);
-      for (const cell of grid) {
-        if (signal?.aborted) break;
-        const more = await findPlacesAlong(
-          [{ ...cell, _r: cellRadius }],
-          categories,
-          cellRadius,
-          { signal },
-        );
-        out.push(...more);
-        if (out.length >= minResults * 2) break;
-      }
-      return { source: "grid", places: out };
-    })());
+export async function findPlacesInCircle(mid, categories, radiusM, { signal } = {}) {
+  if (!mid || !Array.isArray(categories) || categories.length === 0) return [];
+  // Single anchor -- Photon handles this directly.
+  let places = await photonPoiSearch(mid, categories, radiusM, signal);
+  if (places.length === 0) {
+    places = await nominatimPoiSearch(mid, categories, radiusM, signal);
   }
-
-  // Fire all tasks in parallel from the start. Wait for them in
-  // submission order so we can short-circuit and abort the rest once
-  // any single task has produced enough hits on its own. If no task
-  // reaches the threshold by itself, we wait for ALL of them to finish
-  // and merge -- guaranteeing the user always sees suggestions even in
-  // the pathological case where the corridor alone is empty.
-  //
-  // Tasks are kicked off synchronously above, so they're already running
-  // concurrently. The await loop below just unblocks as each completes.
-  const placeByKey = new Map();
-  const addAll = (places) => {
-    for (const p of places) {
-      const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
-      if (!placeByKey.has(k)) placeByKey.set(k, p);
-    }
-  };
-  let shortCircuited = false;
-  for (const task of tasks) {
-    const { places } = await task;
-    addAll(places);
-    if (places.length >= minResults && !shortCircuited) {
-      shortCircuited = true;
-      // Abort any in-flight tasks so they don't waste cycles.
-      if (signal && "abort" in signal) signal.abort?.();
-      break;
-    }
-  }
-  // Drain the remaining tasks so we don't leak in-flight fetches.
-  await Promise.allSettled(tasks);
-  return [...placeByKey.values()];
-}
-
-/**
- * Build a `rows x cols` grid of anchor points covering the bounding box
- * defined by two endpoints. Used as a last-resort fallback when the
- * smart line + corridor + expanding-mid strategies all fail.
- */
-function makeBboxGrid(a, b, cols = 3, rows = 3) {
-  const minLat = Math.min(a.lat, b.lat);
-  const maxLat = Math.max(a.lat, b.lat);
-  const minLon = Math.min(a.lon, b.lon);
-  const maxLon = Math.max(a.lon, b.lon);
+  // Dedupe by ~30m proximity (Photon and Nominatim can both return the
+  // same cafe twice with slightly different coordinates).
   const out = [];
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      // Use cell *centres* (offset by 0.5) so the search circles cover
-      // the whole box, not just the corners.
-      const tLat = (r + 0.5) / rows;
-      const tLon = (c + 0.5) / cols;
-      out.push({
-        lat: minLat + (maxLat - minLat) * tLat,
-        lon: minLon + (maxLon - minLon) * tLon,
-      });
+  const seen = [];
+  for (const p of places) {
+    const dupe = seen.some(
+      (q) => Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
+    );
+    if (!dupe) {
+      seen.push(p);
+      out.push(p);
     }
   }
   return out;
+}
+
+/**
+ * Run the v4 circle-from-midpoint algorithm.
+ *
+ * 1. Compute `mid = midpoint(A, B)` and `directM = haversine(A, B)`.
+ * 2. Start at radius `baseRadiusFor(directM)` (the fair-zone boundary).
+ * 3. If too few places, expand the radius geometrically (×1.5 per step)
+ *    up to `maxRadiusFor(directM)` and try again.
+ * 4. Return the union of places found across all radii, deduplicated.
+ *
+ * The caller (app.js) handles the OSRM ETA matrix and ranking. This
+ * function is intentionally narrow: just give me the places that live
+ * inside an expanding circle around the midpoint.
+ */
+export async function findPlacesAlways(mid, categories, directM, {
+  signal, minResults = 5,
+} = {}) {
+  const steps = expandSteps(directM, { maxSteps: 6 });
+  const all = [];
+  const seen = []; // for ~30m dedup
+
+  for (const radiusM of steps) {
+    if (signal?.aborted) break;
+    const more = await findPlacesInCircle(mid, categories, radiusM, { signal });
+    for (const p of more) {
+      const dupe = seen.some(
+        (q) => Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
+      );
+      if (!dupe) {
+        seen.push(p);
+        all.push(p);
+      }
+    }
+    // Stop as soon as we have enough.
+    if (all.length >= minResults) break;
+  }
+  return all;
 }
 
 function makeError(code, message) {

@@ -1,18 +1,33 @@
 // ============================================================
 //  app.js  --  entry point. Inputs, suggestion dropdowns, map,
 //              pipeline, and i18n glue.
+//
+//  v4: pure circle-from-midpoint algorithm. One anchor, expanding radius.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=38";
-import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=38";
-import { osrmTable } from "./routing.js?v=38";
-import { midpoint, rankByFairness, rankByFairnessFirst, rankByFairestFromMid, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors, projectOntoAxis } from "./midpoint.js?v=38";
-import { MidpointMap } from "./map.js?v=38";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=38";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=39";
+import { findPlacesInCircle, findPlacesAlways } from "./places.js?v=39";
+import { osrmTable } from "./routing.js?v=39";
+import {
+  midpoint,
+  rankByCircleDistance,
+  rankByFairnessFromCircle,
+  rankByTotalDriveFromCircle,
+  fmtEta,
+  fmtDist,
+  isFair,
+  haversine,
+  haversineEta,
+  baseRadiusFor,
+  expandSteps,
+  circleRadiusFor,
+} from "./midpoint.js?v=39";
+import { MidpointMap } from "./map.js?v=39";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=39";
 
-const RADIUS_M = 1500;           // BASE per-anchor POI search radius (overridden per-call by length-aware scaling)
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
 const MAX_RESULTS = 10;          // how many to render
+const MIN_RESULTS_FOR_HAPPY = 5; // stop expanding once we have at least this many candidates
 const DEBOUNCE_MS = 350;
 const DEFAULT_CATEGORIES = ["cafe", "restaurant", "bar"];
 const SUGGEST_MIN_CHARS = 2;
@@ -31,8 +46,7 @@ const state = {
   mid: null,
   a: null,
   b: null,
-  // Map from {search: rank} so we can rotate viewpoints on the same result
-  // set without re-querying the geocoders.
+  searchRadius: null,   // radius (metres) of the circle we searched, for re-sorting
   shareOn: false,
   suggestFocus: null,  // { side, idx } for arrow-key nav
 };
@@ -408,6 +422,7 @@ async function runPipeline() {
   els.resultList.innerHTML = "";
   map.clearPlaces();
   map.clearLines();
+  map.clearCircles();
   updateFindBtn();
 
   const a = state.sides.a.point;
@@ -417,87 +432,70 @@ async function runPipeline() {
   state.a = a;
   state.b = b;
   const directM = haversine(a, b);
+  // The starting radius -- the strict fair-zone boundary. Places inside
+  // this circle are reachable by both people in roughly the same time.
+  const searchRadius = baseRadiusFor(directM);
 
   map.setSide("a", a);
   map.setSide("b", b);
   map.setMidpoint(mid);
 
-  // Draw the "fair zone" circles -- one around each endpoint with radius
-  // equal to directM * 0.5. Their intersection is the area where a truly
-  // fair meeting point could exist.
-  map.clearCircles();
-  const fairRadius = Math.max(800, directM * 0.5);
-  map.drawFairCircle(a, fairRadius, { color: "#7ec8ff", fillOpacity: 0.06 });
-  map.drawFairCircle(b, fairRadius, { color: "#c8a2ff", fillOpacity: 0.06 });
+  // The user requested: "from the actual midpoint extend a circle and
+  // after some point find places". Visualise the circle so they can see
+  // what's inside it. If we end up expanding the radius during the
+  // search, we'll redraw with the larger radius.
+  map.drawMidCircle(mid, searchRadius);
 
-  map.drawLine(a, mid, { color: "#7ec8ff", opacity: 0.45 });
-  map.drawLine(b, mid, { color: "#c8a2ff", opacity: 0.45 });
+  map.drawLine(a, mid, { color: "#7ec8ff", opacity: 0.4 });
+  map.drawLine(b, mid, { color: "#c8a2ff", opacity: 0.4 });
   map.fitTo([a, b, mid]);
   map.invalidate();
 
   try {
     setHint(t("hint.places"), "");
-    // 1.4x the fair zone — slightly generous, since real-world driving
-    // distance is typically 1.2-1.5x the straight line, and a place 10%
-    // outside the strict "fair" ring might still be the best vibe option.
-    const candidateFilterM = fairRadius * 1.4;
-    const anchors = buildAnchors(a, b, directM, fairRadius);
 
-    // Length-aware per-anchor radius: each line/corridor anchor must reach
-    // far enough that adjacent anchors OVERLAP, otherwise we leave gaps in
-    // the corridor. The required reach is `directM / lineSamples` -- equal
-    // to the gap between adjacent samples, so each circle reaches into its
-    // neighbour. For Beylikdüzü↔Kartal (50km, 7 samples) that's ~6700m,
-    // vs the old hard-coded 800m which made whole stretches of corridor
-    // appear empty. The 2x Photon distance filter on top still trims hits
-    // that drift outside the immediate circle.
-    const lineSamplesN = directM < 15000 ? 5 : 7;
-    const perAnchorM = Math.max(RADIUS_M, Math.ceil(directM / lineSamplesN));
-    // Length-aware expanding fallback cap: at minimum, the widening should
-    // cover 40% of the line so even when the strict corridor returns
-    // nothing the safety net reaches into the populated half of the city.
-    // For a 50km line that's 20km -- pretty much the whole of Istanbul.
-    const maxRadiusM = Math.max(9000, Math.ceil(directM * 0.4));
+    // ---- v4: circle-from-midpoint search ----
+    //
+    // Search ONE circle around the midpoint, starting at the fair-zone
+    // boundary. If too few results, expand the radius (×1.5 per step) up
+    // to maxRadiusFor(directM). Redraw the visible circle each step so
+    // the user sees where we're searching.
+    const cats = [...state.categories];
+    const searchCtl = new AbortController();
+    const onAbort = () => searchCtl.abort();
+    window.addEventListener("beforeunload", onAbort, { once: true });
 
-    // findPlacesAlways tries the smart anchor set first with the scaled
-    // radius; if that returns fewer than 5 places (or zero), it widens
-    // the search around the geographic midpoint with progressively larger
-    // radii up to maxRadiusM. If STILL empty, falls back to a 3x3 grid
-    // search across the entire A↔B bounding box -- this is the ultimate
-    // "guaranteed suggestions" safety net for any reasonable input.
-    const allPlaces = await findPlacesAlways(anchors, [...state.categories], mid, {
-      startRadiusM: perAnchorM,
-      stepM: Math.max(1500, Math.ceil(directM * 0.1)),
-      maxRadiusM,
-      minResults: 5,
-      bboxA: a,
-      bboxB: b,
-    });
-
-    // Drop places whose straight-line distance from BOTH endpoints exceeds
-    // candidateFilterM -- those would never be fair no matter what traffic
-    // does. This is a hard pre-filter before the expensive OSRM call.
-    // Note: candidateFilterM is the FAIR ZONE × 1.4, which grows with line
-    // length (e.g. 35km for Beylikdüzü↔Kartal at 50km) so this is generous
-    // enough that the user's guarantee ("always suggest something") holds.
-    let candidates = allPlaces
-      .filter((p) => haversine(a, p) <= candidateFilterM && haversine(b, p) <= candidateFilterM)
-      .slice(0, MAX_CANDIDATES);
-
-    // If the strict fair-zone filter dropped everything, fall back to the
-    // unfiltered set. The user wanted "somewhere further for both of them
-    // but it should still list" -- so we relax the cap rather than show
-    // zero results.
-    if (candidates.length === 0) {
-      candidates = allPlaces.slice(0, MAX_CANDIDATES);
+    let allPlaces = [];
+    let finalRadius = searchRadius;
+    const steps = expandSteps(directM);
+    for (let s = 0; s < steps.length; s++) {
+      if (searchCtl.signal.aborted) break;
+      const r = steps[s];
+      // Photon handles the single-circle case directly. We give it a
+      // generous viewport so it returns the closest hits within `r` even
+      // if some cafe sits exactly on the boundary.
+      const more = await findPlacesInCircle(mid, cats, r, { signal: searchCtl.signal });
+      for (const p of more) {
+        const dupe = allPlaces.some(
+          (q) => Math.abs(q.lat - p.lat) < 0.0003 && Math.abs(q.lon - p.lon) < 0.0003
+        );
+        if (!dupe) allPlaces.push(p);
+      }
+      finalRadius = r;
+      // Update the visible circle as we expand.
+      map.drawMidCircle(mid, r);
+      if (allPlaces.length >= MIN_RESULTS_FOR_HAPPY) break;
     }
+    window.removeEventListener("beforeunload", onAbort);
 
-    if (candidates.length === 0) {
-      // Even the expanding-radius search came up empty. Surface a clear
-      // hint that the user can try a different category.
+    if (allPlaces.length === 0) {
       setHint(t("hint.no_places"), "warn");
       return;
     }
+
+    // Cap before the (expensive) OSRM call. 14 + 2 sources = 16 coords
+    // fits the OSRM demo's response size comfortably.
+    const candidates = allPlaces.slice(0, MAX_CANDIDATES);
 
     setHint(t("hint.routing"), "");
     let matrix;
@@ -528,17 +526,15 @@ async function runPipeline() {
       };
     });
 
-    // Rank: default to "fairest & closest to midpoint" -- a place that's
-    // roughly equidistant from BOTH endpoints AND not 30km off the axis
-    // (which pure fairness could pick). Other modes ("most fair", "shortest
-    // total") are available via the sort tabs -- toggling just re-sorts the
-    // same set, no re-fetch.
+    // Rank: default = closest to midpoint (what the user asked for:
+    // "find places" -- the most in-circle places come first).
     state.allCandidates = enriched;
-    const ranked = applySort(enriched, state.sortMode, mid, a, b).slice(0, MAX_RESULTS);
+    state.searchRadius = finalRadius;
+    const ranked = applySort(enriched, state.sortMode, mid, a, b, finalRadius).slice(0, MAX_RESULTS);
     state.results = ranked;
     renderResults(ranked);
     renderMapPlaces(ranked);
-    setHint(t("hint.done"), "ok");
+    setHint(t("hint.done", finalRadius), "ok");
     // scroll the user to the results
     setTimeout(() => els.results.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
   } catch (e) {
@@ -553,69 +549,6 @@ async function runPipeline() {
     state.finding = false;
     updateFindBtn();
   }
-}
-
-/**
- * Build the list of search anchors based on how far apart A and B are.
- *
- * - Very close (<2km):  just use endpoints + midpoint
- * - Medium (2-15km):     endpoints + 5 line samples + 1 mid
- * - Far (>15km):         endpoints + 7 line samples + perpendicular corridor
- *
- * The point: for Kadıköy↔Kartal (~14km across the Marmara coast), the
- * geographic midpoint is in the sea. We MUST search along the line between
- * them, not just at the midpoint.
- */
-function buildAnchors(a, b, directM, fairRadius) {
-  const out = [];
-  // Endpoints with a tight radius -- "near A but not at A" is a valid pick
-  out.push(a, b);
-
-  if (directM < 2000) {
-    // Very close: midpoint is enough
-    out.push(midpoint(a, b));
-    return out;
-  }
-
-  const lineSamples = directM < 15000 ? 5 : 7;
-  for (const p of sampleAlongLine(a, b, lineSamples)) {
-    out.push(p);
-    // For longer distances, also sample off the line in case the straight
-    // line passes through a sea/mountain but cafes live on the coast nearby.
-    // The corridor reach must also grow with directM, otherwise for very
-    // long lines the perpendicular sampling misses whole districts.
-    if (directM >= 5000) {
-      const brg = bearing(a, b);
-      // Corridor offset = 1/4 of the line length, capped so it stays
-      // reasonable. For 50km line that's 12.5km -- covers a wide swath.
-      const corridorOffset = Math.min(20000, Math.max(800, Math.ceil(directM * 0.25)));
-      out.push(offsetPoint(p,  corridorOffset, brg + 90));
-      out.push(offsetPoint(p, -corridorOffset, brg + 90));
-    }
-  }
-
-  // TANGENT CHORD: the two fair-zone circles (one around A, one around B,
-  // both radius fairRadius) have external tangent points. The line between
-  // those points -- perpendicular to A->B, offset by fairRadius -- is
-  // where places are equidistant from BOTH endpoints. Add several anchors
-  // along this chord so we don't miss genuinely fair meeting points.
-  if (directM >= 2000) {
-    for (const p of tangentChordAnchors(a, b, fairRadius, lineSamples)) {
-      out.push(p);
-    }
-  }
-
-  // Always include the geographic midpoint too.
-  out.push(midpoint(a, b));
-
-  // Dedupe by ~50m.
-  const seen = [];
-  const deduped = [];
-  for (const p of out) {
-    const dupe = seen.some((q) => haversine(p, q) < 50);
-    if (!dupe) { seen.push(p); deduped.push(p); }
-  }
-  return deduped;
 }
 
 // ============================================================
@@ -647,21 +580,13 @@ function renderResults(ranked) {
       ? `<span class="fair-badge">${t("fair")}</span>`
       : `<span class="fair-badge unfair">${t("unfair", fmtEta(delta))}</span>`;
 
-    // Project onto the A→B axis: gives us "how fair geometrically" the
-    // place is. We surface this on the row so the user can SEE WHY a
-    // particular place was ranked where it was -- no opacity-engine.
-    let onAxisKm = null;
-    if (state.a && state.b) {
-      const proj = projectOntoAxis(state.a, state.b, r);
-      onAxisKm = proj.perpM / 1000;
-    }
+    // Build the explain-why string: Δ and distance-to-mid. Simpler than v3
+    // -- the circle-based algorithm doesn't need axis-projection since the
+    // search itself is bounded by the circle.
     const distMid = state.mid ? haversine(state.mid, r) : 0;
     const etaA = fmtEta(r.eta_a_s);
     const etaB = fmtEta(r.eta_b_s);
-
-    // Build the explain-why popover so the user can hover any result and
-    // see "why is this #1?" (fairness, axis-projection, distance to mid)
-    const explain = `Δ ${fmtEta(delta)} · ${onAxisKm != null ? `${onAxisKm.toFixed(onAxisKm < 1 ? 2 : 1)}km off-axis · ` : ""}${fmtDist(distMid)} from mid`;
+    const explain = `Δ ${fmtEta(delta)} · ${fmtDist(distMid)} from mid`;
 
     const catName = t("cat.label")[r.category] || r.category;
     const mapsUrl  = mapsDeepLink(r.lat, r.lon, r.name);
@@ -775,12 +700,18 @@ els.aboutBtn.addEventListener("click", () => {
 /**
  * Apply the current sort mode to the candidates. Pure function over a copy.
  * `mid` is required for "midpoint" mode; falls back to fairness sort if
- * somehow missing (shouldn't happen).
+ * somehow missing (shouldn't happen). `radiusM` is the search radius --
+ * used by the "closest to midpoint" sort to drop candidates outside
+ * the circle.
  */
-function applySort(candidates, mode, mid, a, b) {
-  if (mode === "fair")   return rankByFairnessFirst(candidates);
-  if (mode === "total")  return rankByTotalDrive(candidates);
-  return rankByFairestFromMid(candidates, mid, a, b); // default
+function applySort(candidates, mode, mid, a, b, radiusM = null) {
+  if (mode === "fair")  return rankByFairnessFromCircle(candidates, mid);
+  if (mode === "total") return rankByTotalDriveFromCircle(candidates, mid);
+  // Default: closest to midpoint. The radius filter is applied INSIDE
+  // rankByCircleDistance so that candidates outside the search circle
+  // get dropped -- this keeps results consistent with what the user saw
+  // on the map.
+  return rankByCircleDistance(candidates, mid, radiusM);
 }
 
 // Re-sort whenever a sort tab is clicked. Uses cached `allCandidates`
@@ -797,7 +728,14 @@ sortTabs.forEach((tab) => {
       t.setAttribute("aria-selected", active ? "true" : "false");
     });
     if (!state.allCandidates.length || !state.mid) return;
-    const ranked = applySort(state.allCandidates, state.sortMode, state.mid, state.a, state.b).slice(0, MAX_RESULTS);
+    const ranked = applySort(
+      state.allCandidates,
+      state.sortMode,
+      state.mid,
+      state.a,
+      state.b,
+      state.searchRadius,
+    ).slice(0, MAX_RESULTS);
     state.results = ranked;
     renderResults(ranked);
     renderMapPlaces(ranked);

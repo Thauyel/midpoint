@@ -2,6 +2,8 @@
 //  tests/test_midpoint.mjs
 //  Tiny zero-dep test runner. Runs in plain node:
 //      node tests/test_midpoint.mjs
+//
+//  Tests the v4 circle-from-midpoint algorithm.
 // ============================================================
 
 import {
@@ -9,22 +11,19 @@ import {
   midpoint,
   fmtEta,
   fmtDist,
-  rankByFairness,
-  rankByFairnessFirst,
-  rankByMidpointDistance,
-  rankByFairestFromMid,
-  rankByTotalDrive,
+  rankByCircleDistance,
+  rankByFairnessFromCircle,
+  rankByTotalDriveFromCircle,
   isFair,
   haversineEta,
-  lerpLatLon,
-  sampleAlongLine,
-  searchAnchors,
   bearing,
   offsetPoint,
-  corridorAnchors,
-  tangentChordAnchors,
-  expandingAnchors,
-  projectOntoAxis,
+  circleRadiusFor,
+  expandSteps,
+  baseRadiusFor,
+  maxRadiusFor,
+  insideCircle,
+  MIN_RADIUS_M,
 } from "../js/midpoint.js";
 
 let passed = 0;
@@ -67,7 +66,6 @@ test("Istanbul → Ankara ≈ 350 km", () => {
   const ist = { lat: 41.0082, lon: 28.9784 };
   const ank = { lat: 39.9334, lon: 32.8597 };
   const km = haversine(ist, ank) / 1000;
-  // Real value ~350.4 km. Allow 1% slack.
   if (Math.abs(km - 350) > 4) throw new Error(`expected ~350 km, got ${km.toFixed(2)}`);
 });
 
@@ -97,7 +95,6 @@ test("midpoint of Istanbul and Ankara ≈ Bolu area", () => {
   const ist = { lat: 41.0082, lon: 28.9784 };
   const ank = { lat: 39.9334, lon: 32.8597 };
   const m = midpoint(ist, ank);
-  // Expected ~ (40.47, 30.92)
   approx(m.lat, 40.47, 0.05);
   approx(m.lon, 30.92, 0.05);
 });
@@ -137,37 +134,6 @@ test("fmtDist handles m / km", () => {
   if (fmtDist(12345)!== "12.3 km")throw new Error("12345");
 });
 
-console.log("\n== rankByFairness ==");
-
-test("ranks by total time ascending", () => {
-  const ranked = rankByFairness([
-    { name: "slow", eta_a_s: 1200, eta_b_s: 1200 },
-    { name: "fast", eta_a_s: 300,  eta_b_s: 300  },
-    { name: "mid",  eta_a_s: 600,  eta_b_s: 600  },
-  ]);
-  eq(ranked.map((r) => r.name), ["fast", "mid", "slow"]);
-});
-
-test("tiebreaker is fairness (smaller |Δ| wins)", () => {
-  const ranked = rankByFairness([
-    { name: "unfair", eta_a_s: 500, eta_b_s: 700 }, // total 1200, Δ 200
-    { name: "fair",   eta_a_s: 600, eta_b_s: 600 }, // total 1200, Δ 0
-  ]);
-  eq(ranked.map((r) => r.name), ["fair", "unfair"]);
-});
-
-test("does not mutate input", () => {
-  const input = [
-    { name: "c", eta_a_s: 900, eta_b_s: 100 },
-    { name: "a", eta_a_s: 100, eta_b_s: 900 },
-    { name: "b", eta_a_s: 500, eta_b_s: 500 },
-  ];
-  const before = JSON.stringify(input);
-  rankByFairness(input);
-  const after = JSON.stringify(input);
-  if (before !== after) throw new Error("input array was mutated");
-});
-
 console.log("\n== isFair ==");
 
 test("isFair true for |Δ| <= 5min", () => {
@@ -179,40 +145,19 @@ test("isFair false for |Δ| > 5min", () => {
   if (isFair({ eta_a_s: 600, eta_b_s: 901 })) throw new Error("301s Δ should be unfair");
 });
 
-console.log("\n== sampling helpers ==");
+console.log("\n== haversineEta ==");
 
-test("lerpLatLon midpoint at t=0.5", () => {
-  const a = { lat: 40.992, lon: 29.025 };
-  const b = { lat: 40.888, lon: 29.184 };
-  const m = lerpLatLon(a, b, 0.5);
-  if (Math.abs(m.lat - 40.940) > 0.001) throw new Error(`lat off: ${m.lat}`);
-  if (Math.abs(m.lon - 29.1045) > 0.001) throw new Error(`lon off: ${m.lon}`);
+test("haversineEta returns seconds scaled by speed", () => {
+  const eta = haversineEta(1000);
+  if (Math.abs(eta - 120) > 1) throw new Error(`expected ~120, got ${eta}`);
 });
 
-test("sampleAlongLine returns n points strictly inside (0,1)", () => {
-  const a = { lat: 0, lon: 0 };
-  const b = { lat: 10, lon: 10 };
-  const pts = sampleAlongLine(a, b, 5);
-  if (pts.length !== 5) throw new Error(`expected 5, got ${pts.length}`);
-  for (const p of pts) {
-    if (p.lat < 0 || p.lat > 10) throw new Error(`lat out of range: ${p.lat}`);
-    if (p.lon < 0 || p.lon > 10) throw new Error(`lon out of range: ${p.lon}`);
-  }
+test("haversineEta floors at MIN_ETA_S for tiny distances", () => {
+  const eta = haversineEta(10);
+  if (eta !== 90) throw new Error(`expected 90, got ${eta}`);
 });
 
-test("searchAnchors dedupes points within 50m", () => {
-  const a = { lat: 40.992, lon: 29.025 };
-  const b = { lat: 40.888, lon: 29.184 };
-  const anchors = searchAnchors(a, b, 5);
-  if (anchors.length > 8) throw new Error(`too many anchors: ${anchors.length}`);
-  for (let i = 0; i < anchors.length; i++) {
-    for (let j = i+1; j < anchors.length; j++) {
-      if (haversine(anchors[i], anchors[j]) < 50) {
-        throw new Error(`anchors ${i},${j} too close: ${haversine(anchors[i], anchors[j])}m`);
-      }
-    }
-  }
-});
+console.log("\n== bearing / offsetPoint ==");
 
 test("bearing is 0 between two points due north", () => {
   const a = { lat: 40, lon: 29 };
@@ -235,237 +180,253 @@ test("offsetPoint round-trips bearing+distance", () => {
   if (Math.abs(b.lon - 29) > 0.001) throw new Error(`lon off: ${b.lon}`);
 });
 
-test("corridorAnchors produces 2n points", () => {
-  const a = { lat: 40.992, lon: 29.025 };
-  const b = { lat: 40.888, lon: 29.184 };
-  const c = corridorAnchors(a, b, 5, 600);
-  if (c.length !== 10) throw new Error(`expected 10, got ${c.length}`);
+// ============================================================
+//  v4: circle-from-midpoint algorithm
+// ============================================================
+
+console.log("\n== circle radius (v4) ==");
+
+test("baseRadiusFor(directM) returns directM/2", () => {
+  const r = baseRadiusFor(10_000);
+  if (Math.abs(r - 5000) > 1) throw new Error(`expected ~5000, got ${r}`);
 });
 
-console.log("\n== tangent chord ==");
-
-test("tangentChordAnchors produces 4n points", () => {
-  const a = { lat: 40.992, lon: 29.025 };
-  const b = { lat: 40.888, lon: 29.184 };
-  const r = 5000;
-  const c = tangentChordAnchors(a, b, r, 5);
-  // 5 line samples × 4 points each (offset +r, offset -r, r*0.4, -r*0.4)
-  if (c.length !== 20) throw new Error(`expected 20, got ${c.length}`);
+test("baseRadiusFor floors at MIN_RADIUS_M for tiny lines", () => {
+  const r = baseRadiusFor(100);
+  if (r < MIN_RADIUS_M) throw new Error(`expected ≥ ${MIN_RADIUS_M}, got ${r}`);
 });
 
-test("tangent chord points are equidistant from A and B", () => {
-  // For two circles of equal radius r centred at A and B, the tangent
-  // chord points sit on a line perpendicular to A→B at distance r from
-  // the line AB. They should be roughly equidistant from A and B.
-  const a = { lat: 41.0, lon: 29.0 };
-  const b = { lat: 41.0, lon: 29.1 };  // 10km east of A
-  const r = 5000;
-  const chord = tangentChordAnchors(a, b, r, 1);
-  // The offset=200 points should be roughly equidistant (small inset).
-  for (const p of chord) {
-    const dA = haversine(a, p);
-    const dB = haversine(b, p);
-    if (Math.abs(dA - dB) > 100) {
-      throw new Error(`not equidistant: dA=${dA} dB=${dB} point=${JSON.stringify(p)}`);
+test("circleRadiusFor step 0 = base", () => {
+  const r = circleRadiusFor(10_000, 0);
+  if (Math.abs(r - 5000) > 1) throw new Error(`expected ~5000, got ${r}`);
+});
+
+test("circleRadiusFor step 1 = 1.5x the base", () => {
+  const r = circleRadiusFor(10_000, 1);
+  if (Math.abs(r - 7500) > 1) throw new Error(`expected ~7500, got ${r}`);
+});
+
+test("circleRadiusFor grows monotonically (or holds at cap)", () => {
+  // For directM=20km, maxRadiusFor is 20km. Once we hit the cap, we stay
+  // there (we don't keep growing). So the sequence must be monotonic-or-equal,
+  // strictly increasing until the cap, then constant.
+  const directM = 20_000;
+  const radii = [0, 1, 2, 3, 4, 5, 6].map((s) => circleRadiusFor(directM, s));
+  for (let i = 1; i < radii.length; i++) {
+    if (radii[i] < radii[i - 1]) {
+      throw new Error(`step ${i} (${radii[i]}) must be ≥ step ${i - 1} (${radii[i - 1]})`);
     }
   }
-});
-
-test("expandingAnchors produces N anchors with growing radius", () => {
-  const mid = { lat: 40.94, lon: 29.10 };
-  const anchors = expandingAnchors(mid, 2000, 1500, 5);
-  if (anchors.length !== 5) throw new Error(`expected 5, got ${anchors.length}`);
-  if (anchors[0]._r !== 2000) throw new Error(`first radius ${anchors[0]._r}`);
-  if (anchors[4]._r !== 8000) throw new Error(`last radius ${anchors[4]._r}`);
-});
-
-console.log("\n== haversineEta ==");
-
-test("haversineEta returns seconds scaled by speed", () => {
-  const eta = haversineEta(1000);
-  if (Math.abs(eta - 120) > 1) throw new Error(`expected ~120, got ${eta}`);
-});
-
-test("haversineEta floors at MIN_ETA_S for tiny distances", () => {
-  const eta = haversineEta(10);
-  if (eta !== 90) throw new Error(`expected 90, got ${eta}`);
-});
-
-console.log("\n== ranking ==");
-
-test("rankByFairness prefers small |Δ| when totals are equal", () => {
-  const a = { eta_a_s: 900, eta_b_s: 900 };
-  const b = { eta_a_s: 800, eta_b_s: 1000 };
-  const ranked = rankByFairness([b, a]);
-  // rankByFairness returns new objects (spread) so compare eta fields
-  if (ranked[0].eta_a_s !== 900 || ranked[0].eta_b_s !== 900) {
-    throw new Error(`expected a first, got ${JSON.stringify(ranked[0])}`);
+  // First few steps must be strictly increasing.
+  if (radii[0] >= radii[1] || radii[1] >= radii[2]) {
+    throw new Error(`early steps should be strictly increasing: ${radii.slice(0, 3)}`);
   }
 });
 
-test("rankByMidpointDistance sorts by distance to midpoint ascending", () => {
+test("circleRadiusFor caps at maxRadiusFor(directM)", () => {
+  const directM = 5_000;
+  const r = circleRadiusFor(directM, 10);
+  if (r > maxRadiusFor(directM)) {
+    throw new Error(`step 10 radius ${r} exceeds maxRadiusFor ${maxRadiusFor(directM)}`);
+  }
+});
+
+test("circleRadiusFor returns sane numbers for a city line (50 km)", () => {
+  // Beylikdüzü ↔ Kartal: 50 km, ~25 km fair radius. Step 0 = 25 km.
+  const directM = 50_000;
+  const r0 = circleRadiusFor(directM, 0);
+  if (r0 < 20_000 || r0 > 30_000) {
+    throw new Error(`expected 20-30km for step 0, got ${r0}`);
+  }
+});
+
+console.log("\n== insideCircle ==");
+
+test("insideCircle: midpoint itself is always inside", () => {
   const mid = { lat: 41.0, lon: 29.0 };
-  // Place near midpoint
+  if (!insideCircle(mid, mid, 1000)) {
+    throw new Error("midpoint should be inside its own circle");
+  }
+});
+
+test("insideCircle: point exactly on the radius boundary is inside (closed set)", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const p = offsetPoint(mid, 1000, 90); // 1km east
+  if (!insideCircle(p, mid, 1000)) {
+    throw new Error("point on the radius boundary should be inside (closed set)");
+  }
+});
+
+test("insideCircle: point just beyond the radius is outside", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const p = offsetPoint(mid, 1500, 90); // 1.5km east
+  if (insideCircle(p, mid, 1000)) {
+    throw new Error("point beyond radius should be outside");
+  }
+});
+
+test("insideCircle: rejects nulls safely", () => {
+  if (insideCircle(null, { lat: 0, lon: 0 }, 1000)) {
+    throw new Error("null point should return false");
+  }
+  if (insideCircle({ lat: 0, lon: 0 }, null, 1000)) {
+    throw new Error("null center should return false");
+  }
+});
+
+console.log("\n== rankByCircleDistance (default sort) ==");
+
+test("rankByCircleDistance: closest to midpoint wins", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
   const near = { lat: 41.001, lon: 29.001, eta_a_s: 900, eta_b_s: 900 };
-  // Place on the geographic far side
-  const far  = { lat: 41.05, lon: 29.05,  eta_a_s: 600, eta_b_s: 600 };
-  const ranked = rankByMidpointDistance([far, near], mid);
+  const far  = { lat: 41.05,  lon: 29.05,  eta_a_s: 600, eta_b_s: 600 };
+  const ranked = rankByCircleDistance([far, near], mid);
   if (ranked[0].lat !== near.lat) {
-    throw new Error(`expected "near" first (closer to mid), got ${JSON.stringify(ranked[0])}`);
+    throw new Error(`expected near first, got ${JSON.stringify(ranked[0])}`);
   }
 });
 
-test("rankByMidpointDistance breaks ties by fairness when distances are equal", () => {
+test("rankByCircleDistance: breaks ties by fairness when distance equal", () => {
   const mid = { lat: 41.0, lon: 29.0 };
-  // Two places at the SAME distance from mid -- one fair, one unfair
-  const fair =   { lat: 41.01, lon: 29.0, eta_a_s: 600, eta_b_s: 600 };
-  const unfair = { lat: 41.01, lon: 29.0, eta_a_s: 300, eta_b_s: 900 };
-  // To make sure they have ~equal distance, mirror coords: use the same point twice
-  const ranked = rankByMidpointDistance([unfair, { ...fair }], mid);
+  const fair   = { lat: 41.005, lon: 29.005, eta_a_s: 600, eta_b_s: 600 };
+  const unfair = { lat: 41.005, lon: 29.005, eta_a_s: 200, eta_b_s: 1000 };
+  const ranked = rankByCircleDistance([unfair, fair], mid);
   if (ranked[0].eta_a_s !== fair.eta_a_s) {
-    throw new Error(`expected fair tie-breaker to win, got ${JSON.stringify(ranked[0])}`);
+    throw new Error(`expected fair to win tiebreaker, got ${JSON.stringify(ranked[0])}`);
   }
 });
 
-test("rankByTotalDrive sorts by total ascending", () => {
-  const fast = { eta_a_s: 300, eta_b_s: 300 };  // total 600
-  const slow = { eta_a_s: 900, eta_b_s: 900 };  // total 1800
-  const ranked = rankByTotalDrive([slow, fast]);
+test("rankByCircleDistance: drops candidates outside the given radius", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const inside = { lat: 41.005, lon: 29.005, eta_a_s: 600, eta_b_s: 600 };
+  const outside = { lat: 41.5, lon: 29.5, eta_a_s: 100, eta_b_s: 100 };
+  const ranked = rankByCircleDistance([outside, inside], mid, 1000);
+  if (ranked.some((c) => c.lat === 41.5)) {
+    throw new Error("outside candidate should have been dropped");
+  }
+  if (ranked[0].lat !== inside.lat) {
+    throw new Error(`expected inside first, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByCircleDistance: no radius filter keeps all candidates", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const a = { lat: 41.001, lon: 29.001 };
+  const b = { lat: 41.05,  lon: 29.05  };
+  const ranked = rankByCircleDistance([b, a], mid);
+  if (ranked.length !== 2) throw new Error(`expected 2, got ${ranked.length}`);
+  if (ranked[0].lat !== a.lat) throw new Error(`expected closer first, got ${ranked[0].lat}`);
+});
+
+test("rankByCircleDistance: does not mutate input", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const input = [
+    { lat: 41.05, lon: 29.05, eta_a_s: 100, eta_b_s: 100 },
+    { lat: 41.001, lon: 29.001, eta_a_s: 100, eta_b_s: 100 },
+  ];
+  const before = JSON.stringify(input);
+  rankByCircleDistance(input, mid);
+  const after = JSON.stringify(input);
+  if (before !== after) throw new Error("input mutated");
+});
+
+console.log("\n== rankByFairnessFromCircle ==");
+
+test("rankByFairnessFromCircle: fairness first, |Δ| ascending", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const fair   = { lat: 41.005, lon: 29.005, eta_a_s: 600, eta_b_s: 600 }; // Δ=0
+  const unfair = { lat: 41.005, lon: 29.005, eta_a_s: 200, eta_b_s: 1000 }; // Δ=800
+  const ranked = rankByFairnessFromCircle([unfair, fair], mid);
+  if (ranked[0].eta_a_s !== fair.eta_a_s) {
+    throw new Error(`expected fair first, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByFairnessFromCircle: breaks ties by closeness to mid", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const farFair  = { lat: 41.10, lon: 29.10, eta_a_s: 600, eta_b_s: 600 };
+  const nearFair = { lat: 41.01, lon: 29.01, eta_a_s: 600, eta_b_s: 600 };
+  const ranked = rankByFairnessFromCircle([farFair, nearFair], mid);
+  if (ranked[0].lat !== nearFair.lat) {
+    throw new Error(`expected near fair first, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+console.log("\n== rankByTotalDriveFromCircle ==");
+
+test("rankByTotalDriveFromCircle: eta_a + eta_b ascending", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const fast = { lat: 41.005, lon: 29.005, eta_a_s: 300, eta_b_s: 300 };
+  const slow = { lat: 41.005, lon: 29.005, eta_a_s: 900, eta_b_s: 900 };
+  const ranked = rankByTotalDriveFromCircle([slow, fast], mid);
   if (ranked[0].eta_a_s !== fast.eta_a_s) {
     throw new Error(`expected fast first, got ${JSON.stringify(ranked[0])}`);
   }
 });
 
-test("rankByFairnessFirst places a fair point ahead of an unfair one even if total is longer", () => {
-  const a = { eta_a_s: 900, eta_b_s: 900 };  // fair, total 1800
-  const b = { eta_a_s: 700, eta_b_s: 700 };  // also fair, total 1400
-  const c = { eta_a_s: 200, eta_b_s: 800 };  // |Δ|=600 (unfair)
-  const ranked = rankByFairnessFirst([c, b, a]);
-  if (ranked[0] === c || ranked[2] === c) {
-    throw new Error(`expected c (unfair) last, got order [${ranked.map(r => r.eta_a_s).join(", ")}]`);
+console.log("\n== expandSteps ==");
+
+test("expandSteps: returns radii that grow geometrically then cap", () => {
+  const steps = expandSteps(10_000, { maxRadiusM: 25_000 });
+  if (steps[0] !== 5000) throw new Error(`step 0 expected 5000, got ${steps[0]}`);
+  if (steps[steps.length - 1] > 25_000) {
+    throw new Error(`last step exceeds cap: ${steps[steps.length - 1]}`);
+  }
+  for (let i = 1; i < steps.length; i++) {
+    if (steps[i] <= steps[i - 1]) {
+      throw new Error(`step ${i} (${steps[i]}) must exceed step ${i - 1} (${steps[i - 1]})`);
+    }
   }
 });
 
-console.log("\n== rankByFairestFromMid (default sort) ==");
-
-test("rankByFairestFromMid prefers fair places, with closeness-to-mid as tiebreaker", () => {
-  const mid = { lat: 41.0, lon: 29.0 };
-  // Both ~same distance from M, but one is fair and one is unfair.
-  // The fair one should win despite identical distance-to-mid.
-  const fairNear   = { lat: 41.005, lon: 29.005, eta_a_s: 900, eta_b_s: 900 };  // fair, |Δ|=0
-  const unfairNear = { lat: 41.005, lon: 29.005, eta_a_s: 200, eta_b_s: 800 };  // 600s from same spot
-  const ranked = rankByFairestFromMid([unfairNear, fairNear], mid);
-  if (ranked[0].eta_a_s !== 900) {
-    throw new Error(`expected fair first (with Δ=0), got ${JSON.stringify(ranked[0])}`);
+test("expandSteps: floors at MIN_RADIUS_M even for tiny directM", () => {
+  const steps = expandSteps(50, { maxRadiusM: 5000 });
+  if (steps[0] < MIN_RADIUS_M) {
+    throw new Error(`step 0 below floor: ${steps[0]}`);
   }
 });
 
-test("rankByFairestFromMid falls back to dist-to-mid when no ETAs", () => {
-  // The default ranker must still work even if candidates don't carry ETAs
-  // (the OSRM call might have failed for some or all of them).
-  const mid = { lat: 41.0, lon: 29.0 };
-  const near = { lat: 41.001, lon: 29.001 };
-  const far  = { lat: 41.05,  lon: 29.05 };
-  const ranked = rankByFairestFromMid([far, near], mid);
-  if (ranked[0].lat !== near.lat) {
-    throw new Error(`expected near first when no ETAs, got ${JSON.stringify(ranked[0])}`);
+test("expandSteps: for 50 km line generates several reasonable steps", () => {
+  // Beylikdüzü ↔ Kartal: 50 km line, base = 25 km.
+  // Steps: 25km, 37.5km, capped at 50km. Three steps total.
+  const steps = expandSteps(50_000);
+  if (steps.length < 2) throw new Error(`expected ≥ 2 steps, got ${steps.length}`);
+  if (steps[0] < 20_000 || steps[0] > 30_000) {
+    throw new Error(`first step should be ~25km, got ${steps[0]}`);
   }
 });
 
-test("rankByFairestFromMid breaks fairness ties by closeness-to-mid", () => {
-  const mid = { lat: 41.0, lon: 29.0 };
-  // Two equally fair places, one near M and one far.
-  // The near one should win.
-  const fairFar  = { lat: 41.10, lon: 29.10, eta_a_s: 600, eta_b_s: 600 };  // 14km away, fair
-  const fairNear = { lat: 41.01, lon: 29.01, eta_a_s: 600, eta_b_s: 600 };  // 1.4km away, fair
-  const ranked = rankByFairestFromMid([fairFar, fairNear], mid);
-  if (ranked[0].lat !== fairNear.lat) {
-    throw new Error(`expected near-and-fair first when both are equally fair, got ${JSON.stringify(ranked[0])}`);
+console.log("\n== end-to-end sanity: typical user input ==");
+
+test("Taksim → Kadıköy (~6 km) → base ~3 km, mid in Bosphorus", () => {
+  // Taksim (41.037, 28.985) → Kadıköy (40.992, 29.025).
+  // directM ≈ 6.0 km; base = max(1500, 3000) = 3000m.
+  const taksim = { lat: 41.037, lon: 28.985 };
+  const kadikoy = { lat: 40.992, lon: 29.025 };
+  const m = midpoint(taksim, kadikoy);
+  const directM = haversine(taksim, kadikoy);
+  const base = baseRadiusFor(directM);
+  if (base < 2500 || base > 3500) {
+    throw new Error(`expected base ~3km, got ${base}`);
+  }
+  // Midpoint sits in the Bosphorus area (~41.01, 29.00).
+  if (m.lat < 40.99 || m.lat > 41.04) {
+    throw new Error(`mid lat should be ~41.01 (Bosphorus), got ${m.lat}`);
   }
 });
 
-test("rankByFairestFromMid does NOT prefer a closer-to-mid but highly-unfair place", () => {
-  // The bug we're fixing: an unfair place 1km from M beating a fair place 5km from M.
-  const mid = { lat: 41.0, lon: 29.0 };
-  const nearUnfair = { lat: 41.001, lon: 29.001, eta_a_s: 60, eta_b_s: 1740 };  // near M, very unfair
-  const farFair    = { lat: 41.05,  lon: 29.05,  eta_a_s: 600, eta_b_s: 600 }; // far from M, perfectly fair
-  const ranked = rankByFairestFromMid([nearUnfair, farFair], mid);
-  // The far-but-fair one wins (rankByFairestFromMid prioritises fairness).
-  if (ranked[0].lat !== farFair.lat) {
-    throw new Error(`expected far-but-fair to beat near-but-unfair, got ${JSON.stringify(ranked[0])}`);
+test("Kadıköy → Kartal (~18 km across sea) → base ~9 km, mid in Marmara", () => {
+  const kadikoy = { lat: 40.992, lon: 29.025 };
+  const kartal  = { lat: 40.890, lon: 29.190 };
+  const m = midpoint(kadikoy, kartal);
+  const directM = haversine(kadikoy, kartal);
+  const base = baseRadiusFor(directM);
+  if (base < 8000 || base > 10000) {
+    throw new Error(`expected base ~9km, got ${base}`);
   }
-});
-
-test("rankByFairestFromMid returns original candidates (stable) when ETAs available", () => {
-  const mid = { lat: 41.0, lon: 29.0 };
-  const c1 = { lat: 41.0, lon: 29.0, eta_a_s: 600, eta_b_s: 600, _idx: 0 };
-  const c2 = { lat: 41.01, lon: 29.01, eta_a_s: 600, eta_b_s: 600, _idx: 1 };
-  const ranked = rankByFairestFromMid([c1, c2], mid);
-  if (ranked.length !== 2) throw new Error(`expected 2 candidates back, got ${ranked.length}`);
-  if (!("_idx" in ranked[0])) throw new Error(`expected _idx preserved for stable sort`);
-});
-
-console.log("\n== projectOntoAxis ==");
-
-test("projectOntoAxis: point exactly ON A->B line has perpM ≈ 0", () => {
-  const a = { lat: 41.0, lon: 29.0 };
-  const b = { lat: 41.05, lon: 29.05 };
-  // midpoint between a and b - should have perpM ≈ 0
-  const mid = { lat: 41.025, lon: 29.025 };
-  const proj = projectOntoAxis(a, b, mid);
-  if (proj.perpM > 1) throw new Error(`expected perpM ≈ 0 for point on line, got ${proj.perpM}`);
-});
-
-test("projectOntoAxis: point perpendicular 1km off the line has perpM ≈ 1000", () => {
-  const a = { lat: 41.0, lon: 29.0 };
-  const b = { lat: 41.0, lon: 29.06 };   // due east line (lon increases, lat constant)
-  // 0.009° = ~1km due north of a point on the line -- perpendicular to the line
-  const onLine = { lat: 41.0, lon: 29.03 };
-  const offAxis = { lat: 41.009, lon: 29.03 };
-  const proj = projectOntoAxis(a, b, offAxis);
-  if (Math.abs(proj.perpM - 1000) > 50) {
-    throw new Error(`expected perpM ≈ 1000m, got ${proj.perpM.toFixed(0)}`);
-  }
-});
-
-test("projectOntoAxis: alongM is signed correctly (negative in front of A, positive beyond B)", () => {
-  const a = { lat: 41.0, lon: 29.0 };
-  const b = { lat: 41.05, lon: 29.05 };
-  // 0.005° behind A (so alongM is negative)
-  const behind = { lat: 40.995, lon: 28.995 };
-  const ahead = { lat: 41.055, lon: 29.055 };
-  const p1 = projectOntoAxis(a, b, behind);
-  const p2 = projectOntoAxis(a, b, ahead);
-  if (p1.alongM >= 0) throw new Error(`expected behind-AlongM negative, got ${p1.alongM}`);
-  if (p2.alongM <= 0) throw new Error(`expected ahead-AlongM positive, got ${p2.alongM}`);
-});
-
-test("projectOntoAxis: degenerate (a == b) returns finite perpM", () => {
-  const a = { lat: 41.0, lon: 29.0 };
-  const b = { lat: 41.0, lon: 29.0 };  // same point - degenerate
-  const p = { lat: 41.01, lon: 29.01 };
-  const proj = projectOntoAxis(a, b, p);
-  if (!Number.isFinite(proj.perpM)) {
-    throw new Error(`expected finite perpM for degenerate a==b, got ${proj.perpM}`);
-  }
-});
-
-test("rankByFairestFromMid with axis projection: on-axis fair beats off-axis slightly unfair", () => {
-  // The new axis-aware tiebreaker: a place on the A->B line with
-  // |Δ|=60s should beat a place equally fair (|Δ|=0) but 2km off-axis.
-  // 2km off-axis = 1000s of fairness bonus, so off-axis needs
-  // |Δ| < 1000s to beat on-axis with |Δ|=60s. Both candidates
-  // satisfy that, so on-axis should win.
-  const a = { lat: 41.0, lon: 29.0 };
-  const b = { lat: 41.0, lon: 29.06 };   // due east line
-  const mid = { lat: 41.0, lon: 29.03 };
-  // On-axis place: midpoint area
-  const onAxis = { lat: 41.0, lon: 29.03, eta_a_s: 900, eta_b_s: 960 };  // Δ=60
-  // Off-axis place but very fair: 2km north of midpoint
-  const offAxis = { lat: 41.018, lon: 29.03, eta_a_s: 900, eta_b_s: 900 };  // Δ=0, ~2km off
-  const ranked = rankByFairestFromMid([offAxis, onAxis], mid, a, b);
-  if (ranked[0].lat !== onAxis.lat) {
-    throw new Error(`expected on-axis to win despite worse |Δ|, got ${JSON.stringify(ranked[0])}`);
+  // Midpoint is over the Marmara sea (~lat 40.94, lon 29.10).
+  if (m.lat > 40.96 || m.lat < 40.92) {
+    throw new Error(`mid lat should be ~40.94 (Marmara sea), got ${m.lat}`);
   }
 });
 
