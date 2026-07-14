@@ -5,9 +5,9 @@
 //  v4: pure circle-from-midpoint algorithm. One anchor, expanding radius.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=42";
-import { findPlacesInCircle, findPlacesAlways } from "./places.js?v=42";
-import { osrmTable } from "./routing.js?v=42";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=43";
+import { findPlacesInCircle, findPlacesAlways } from "./places.js?v=43";
+import { osrmTable } from "./routing.js?v=43";
 import {
   midpoint,
   rankByCircleDistance,
@@ -20,9 +20,9 @@ import {
   haversineEta,
   baseRadiusFor,
   expandSteps,
-} from "./midpoint.js?v=42";
-import { MidpointMap } from "./map.js?v=42";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=42";
+} from "./midpoint.js?v=43";
+import { MidpointMap } from "./map.js?v=43";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=43";
 
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
 const MAX_RESULTS = 10;          // how many to render

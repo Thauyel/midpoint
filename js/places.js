@@ -6,7 +6,7 @@
 //  Nominatim is the fallback.
 // ============================================================
 
-import { expandSteps } from "./midpoint.js?v=42";
+import { expandSteps } from "./midpoint.js?v=43";
 
 // Browser-like headers. Nominatim requires identification; the rest is
 // for parity with real browser traffic so we don't trip rate-limiters.
@@ -65,67 +65,98 @@ function inferCategoryFromPhoton(hit, requested) {
 }
 
 async function photonPoiSearch(mid, categories, radiusM, signal) {
+  // Photon's API accepts exactly one `osm_tag` per request. With multiple
+  // categories we MUST issue one request per category (each with its own
+  // osm_tag precision filter) in parallel, then merge. The previous
+  // "single combined q text query" approach returned noisy global chain
+  // restaurants instead of local POIs -- verified by live curl tests.
   const filters = photonFilters(categories);
-  // Photon's `q` text query handles matching. We combine category names into
-  // one query. `osm_tag` is added only when we have a single category --
-  // Photon's API accepts exactly one osm_tag per request.
-  const Q_TERMS = { cafe: "cafe", restaurant: "restaurant", bar: "bar", park: "park" };
-  const q = categories.map((c) => Q_TERMS[c]).filter(Boolean).join(" ") || "cafe restaurant bar park";
-  const url = new URL(PHOTON_ENDPOINT, location.origin);
-  url.searchParams.set("q", q);
-  url.searchParams.set("lat", String(mid.lat));
-  url.searchParams.set("lon", String(mid.lon));
-  // Photon's `location_bias_scale` default of 0.2 can pull results from
-  // hundreds of km away. We set 0.1 to keep POIs local to the endpoint.
-  url.searchParams.set("location_bias_scale", "0.1");
-  url.searchParams.set("limit", "30");
-  url.searchParams.set("zoom", "15");
-  if (filters.length === 1) url.searchParams.set("osm_tag", filters[0]);
-  try {
-    const res = await fetch(url, {
-      headers: { "Accept": "application/json" },
-      signal,
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const features = Array.isArray(data?.features) ? data.features : [];
-    const results = [];
-    const seen = new Set();
-    for (const f of features) {
-      const [lon, lat] = f.geometry?.coordinates || [];
-      const props = f.properties || {};
-      const name = props.name;
-      if (!name || !isFinite(lat) || !isFinite(lon)) continue;
-      // Only keep features whose osm_key+osm_value match one of our
-      // requested categories (Photon's q is fuzzy, we tighten here).
-      const matched = filters.some((kv) => {
-        const [k, v] = kv.split(":");
-        return props.osm_key === k && props.osm_value === v;
+
+  async function fetchOne(qq, osmTag) {
+    const url = new URL(PHOTON_ENDPOINT, location.origin);
+    url.searchParams.set("q", qq);
+    url.searchParams.set("lat", String(mid.lat));
+    url.searchParams.set("lon", String(mid.lon));
+    // Photon's location_bias_scale default of 0.2 pulls results from
+    // hundreds of km away. 0.1 keeps POIs local to the endpoint.
+    url.searchParams.set("location_bias_scale", "0.1");
+    url.searchParams.set("limit", "30");
+    url.searchParams.set("zoom", "15");
+    if (osmTag) url.searchParams.set("osm_tag", osmTag);
+    try {
+      const res = await fetch(url, {
+        headers: { "Accept": "application/json" },
+        signal,
       });
-      if (filters.length > 0 && !matched) continue;
-      // Distance filter: drop anything farther than 2x the radius.
-      // Real geography can be ~30% off a straight line; we use 2x for
-      // generous headroom so cafes across a fjord aren't dropped.
-      const dlat = (lat - mid.lat) * 111000;
-      const dlon = (lon - mid.lon) * 111000 * Math.cos((mid.lat * Math.PI) / 180);
-      const distM = Math.sqrt(dlat * dlat + dlon * dlon);
-      if (distM > radiusM * 2) continue;
-      const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      results.push({
-        id: `photon/${props.osm_type || "n"}/${props.osm_id || key}`,
-        name,
-        lat,
-        lon,
-        category: inferCategoryFromPhoton(f, categories),
-        tags: props,
-      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      const features = Array.isArray(data?.features) ? data.features : [];
+      const out = [];
+      for (const f of features) {
+        const [lon, lat] = f.geometry?.coordinates || [];
+        const props = f.properties || {};
+        const name = props.name;
+        if (!name || !isFinite(lat) || !isFinite(lon)) continue;
+        // With osmTag set on the request, Photon guarantees
+        // osm_key+osm_value match. But some features still slip through
+        // (e.g. suburb place=suburb with name containing 'cafe'). Tighten
+        // to only matching osm_key+osm_value when filters present.
+        if (osmTag) {
+          const [k, v] = osmTag.split(":");
+          if (props.osm_key !== k || props.osm_value !== v) continue;
+        }
+        // Distance filter: drop anything farther than 2x the radius.
+        // Real geography can drift ~30% off a straight line; 2x leaves
+        // headroom for cafes across a fjord.
+        const dlat = (lat - mid.lat) * 111000;
+        const dlon = (lon - mid.lon) * 111000 * Math.cos((mid.lat * Math.PI) / 180);
+        const distM = Math.sqrt(dlat * dlat + dlon * dlon);
+        if (distM > radiusM * 2) continue;
+        out.push({
+          id: `photon/${props.osm_type || "n"}/${props.osm_id || `${lat},${lon}`}`,
+          name,
+          lat,
+          lon,
+          category: inferCategoryFromPhoton(f, categories),
+          tags: props,
+        });
+      }
+      return out;
+    } catch {
+      return [];
     }
-    return results;
-  } catch {
-    return [];
   }
+
+  // Build per-category requests. Each gets its own osm_tag filter so
+  // Photon returns precise local POIs for that exact category.
+  const tasks = filters.map((osmTag) => {
+    // The "q" is just the textual hint; osm_tag is the precision filter.
+    const q = osmTag.split(":")[1] || osmTag;
+    return fetchOne(q, osmTag);
+  });
+  // Photon (and our proxy) rate-limit per-IP. We've seen 5+ concurrent
+  // requests work fine; cap at 4 to stay under any per-second caps.
+  const POOL = 4;
+  const chunks = [];
+  for (let i = 0; i < tasks.length; i += POOL) chunks.push(tasks.slice(i, i + POOL));
+  const all = [];
+  for (const chunk of chunks) {
+    if (signal?.aborted) break;
+    const lists = await Promise.all(chunk);
+    for (const list of lists) all.push(...list);
+  }
+  // Dedupe by 5dp lat/lon (the single-request path already dedupes
+  // within itself; this catches the same cafe returned for overlapping
+  // osm_tags like amenity:restaurant and amenity:fast_food).
+  const out = [];
+  const seen = new Set();
+  for (const p of all) {
+    const k = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(p);
+  }
+  return out;
 }
 
 // ---------- Nominatim POI fallback ----------
