@@ -16,8 +16,6 @@ import {
   rankByTotalDriveFromCircle,
   isFair,
   haversineEta,
-  bearing,
-  offsetPoint,
   circleRadiusFor,
   expandSteps,
   baseRadiusFor,
@@ -157,29 +155,6 @@ test("haversineEta floors at MIN_ETA_S for tiny distances", () => {
   if (eta !== 90) throw new Error(`expected 90, got ${eta}`);
 });
 
-console.log("\n== bearing / offsetPoint ==");
-
-test("bearing is 0 between two points due north", () => {
-  const a = { lat: 40, lon: 29 };
-  const b = { lat: 41, lon: 29 };
-  const brg = bearing(a, b);
-  if (Math.abs(brg - 0) > 1) throw new Error(`expected ~0°, got ${brg}`);
-});
-
-test("bearing is 90 between two points due east", () => {
-  const a = { lat: 40, lon: 29 };
-  const b = { lat: 40, lon: 30 };
-  const brg = bearing(a, b);
-  if (Math.abs(brg - 90) > 1) throw new Error(`expected ~90°, got ${brg}`);
-});
-
-test("offsetPoint round-trips bearing+distance", () => {
-  const a = { lat: 40, lon: 29 };
-  const b = offsetPoint(a, 1000, 0);
-  if (Math.abs(b.lat - 40.009) > 0.002) throw new Error(`lat off: ${b.lat}`);
-  if (Math.abs(b.lon - 29) > 0.001) throw new Error(`lon off: ${b.lon}`);
-});
-
 // ============================================================
 //  v4: circle-from-midpoint algorithm
 // ============================================================
@@ -239,8 +214,14 @@ test("circleRadiusFor returns sane numbers for a city line (50 km)", () => {
     throw new Error(`expected 20-30km for step 0, got ${r0}`);
   }
 });
-
 console.log("\n== insideCircle ==");
+
+// Local inline helper: offset a point by N metres on bearing 90° (due east).
+// We use it for membership tests that need a known-distance point.
+const R_EARTH_M_TEST = 6_371_008.8;
+function offsetEastM(p, m) {
+  return { lat: p.lat, lon: p.lon + (m / (R_EARTH_M_TEST * Math.cos(p.lat * Math.PI / 180))) * (180 / Math.PI) };
+}
 
 test("insideCircle: midpoint itself is always inside", () => {
   const mid = { lat: 41.0, lon: 29.0 };
@@ -251,7 +232,7 @@ test("insideCircle: midpoint itself is always inside", () => {
 
 test("insideCircle: point exactly on the radius boundary is inside (closed set)", () => {
   const mid = { lat: 41.0, lon: 29.0 };
-  const p = offsetPoint(mid, 1000, 90); // 1km east
+  const p = offsetEastM(mid, 1000);
   if (!insideCircle(p, mid, 1000)) {
     throw new Error("point on the radius boundary should be inside (closed set)");
   }
@@ -259,7 +240,7 @@ test("insideCircle: point exactly on the radius boundary is inside (closed set)"
 
 test("insideCircle: point just beyond the radius is outside", () => {
   const mid = { lat: 41.0, lon: 29.0 };
-  const p = offsetPoint(mid, 1500, 90); // 1.5km east
+  const p = offsetEastM(mid, 1500);
   if (insideCircle(p, mid, 1000)) {
     throw new Error("point beyond radius should be outside");
   }
@@ -309,13 +290,34 @@ test("rankByCircleDistance: drops candidates outside the given radius", () => {
   }
 });
 
-test("rankByCircleDistance: no radius filter keeps all candidates", () => {
+test("rankByCircleDistance: works without a radius filter (default behaviour)", () => {
   const mid = { lat: 41.0, lon: 29.0 };
   const a = { lat: 41.001, lon: 29.001 };
   const b = { lat: 41.05,  lon: 29.05  };
   const ranked = rankByCircleDistance([b, a], mid);
   if (ranked.length !== 2) throw new Error(`expected 2, got ${ranked.length}`);
   if (ranked[0].lat !== a.lat) throw new Error(`expected closer first, got ${ranked[0].lat}`);
+});
+
+// Performance/correctness contract: every ranker attaches the precomputed
+// `_dMid` (in metres) to each candidate. Downstream renderResults uses this
+// to avoid recomputing haversine for every result-row paint. If a future
+// refactor accidentally drops _dMid, this test will fail.
+test("ranker_attach_dMid: every ranker attaches _dMid to candidates", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const cand = [{ lat: 41.01, lon: 29.01, eta_a_s: 600, eta_b_s: 700 }];
+  const fromCircle = rankByCircleDistance(cand, mid);
+  if (typeof fromCircle[0]._dMid !== "number" || !isFinite(fromCircle[0]._dMid)) {
+    throw new Error("rankByCircleDistance must attach _dMid");
+  }
+  const fromFair = rankByFairnessFromCircle(cand, mid);
+  if (typeof fromFair[0]._dMid !== "number" || !isFinite(fromFair[0]._dMid)) {
+    throw new Error("rankByFairnessFromCircle must attach _dMid");
+  }
+  const fromTotal = rankByTotalDriveFromCircle(cand, mid);
+  if (typeof fromTotal[0]._dMid !== "number" || !isFinite(fromTotal[0]._dMid)) {
+    throw new Error("rankByTotalDriveFromCircle must attach _dMid");
+  }
 });
 
 test("rankByCircleDistance: does not mutate input", () => {

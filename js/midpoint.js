@@ -158,66 +158,81 @@ export function insideCircle(point, center, radius) {
 //  Rankers
 // ============================================================
 
-/** Rank candidates by distance to the geographic midpoint (ascending).
- *  If `radiusM` is given, candidates OUTSIDE that radius are dropped.
- *  Ties broken by fairness (smaller |eta_a - eta_b|). */
+/**
+ * Rank candidates by distance to the geographic midpoint (ascending).
+ * If `radiusM` is given, candidates OUTSIDE that radius are dropped.
+ * Ties broken by fairness (smaller |eta_a - eta_b|).
+ *
+ * Mutates the input by attaching `_dMid` to each element, so downstream
+ * code (renderResults) can read the pre-computed distance instead of
+ * recomputing haversine for every result-row render.
+ */
 export function rankByCircleDistance(candidates, mid, radiusM = null) {
-  const arr = [...candidates]
-    .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon))
-    .map((c, i) => {
-      const dMid = haversine(mid, c);
-      const inside = radiusM == null ? true : dMid <= radiusM;
-      const fair = Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0));
-      return { c: { ...c, _idx: i, _dMid: dMid }, inside, dMid, fair };
-    })
-    .filter((x) => x.inside)
-    .sort((x, y) => {
-      if (x.dMid !== y.dMid) return x.dMid - y.dMid;
-      if (x.fair !== y.fair) return x.fair - y.fair;
-      return x.c._idx - y.c._idx;
-    })
-    .map((x) => x.c);
-  return arr;
+  // Single pass: compute distance, attach, filter out-of-radius, sort.
+  const arr = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (!Number.isFinite(c.lat) || !Number.isFinite(c.lon)) continue;
+    const dMid = haversine(mid, c);
+    if (radiusM != null && dMid > radiusM) continue;
+    arr.push({ c: { ...c, _idx: i, _dMid: dMid }, dMid, fair: Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0)) });
+  }
+  arr.sort((x, y) => {
+    if (x.dMid !== y.dMid) return x.dMid - y.dMid;
+    if (x.fair !== y.fair) return x.fair - y.fair;
+    return x.c._idx - y.c._idx;
+  });
+  return arr.map((x) => x.c);
 }
 
-/** Rank candidates by fairness (|eta_a - eta_b| ascending). Ties broken
- *  by distance to midpoint (closer wins), then by combined drive time. */
+/**
+ * Rank candidates by fairness (|eta_a - eta_b| ascending). Ties broken
+ * by distance to midpoint (closer wins), then by combined drive time.
+ */
 export function rankByFairnessFromCircle(candidates, mid) {
-  const arr = [...candidates]
-    .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon))
-    .map((c, i) => {
-      const dMid = haversine(mid, c);
-      const fair = Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0));
-      const total = (c.eta_a_s ?? 0) + (c.eta_b_s ?? 0);
-      return { c: { ...c, _idx: i }, dMid, fair, total };
-    })
-    .sort((x, y) => {
-      if (x.fair !== y.fair) return x.fair - y.fair;
-      if (x.dMid !== y.dMid) return x.dMid - y.dMid;
-      if (x.total !== y.total) return x.total - y.total;
-      return x.c._idx - y.c._idx;
-    })
-    .map((x) => x.c);
-  return arr;
+  const arr = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (!Number.isFinite(c.lat) || !Number.isFinite(c.lon)) continue;
+    const dMid = haversine(mid, c);
+    arr.push({
+      c: { ...c, _idx: i, _dMid: dMid },
+      dMid,
+      fair: Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0)),
+      total: (c.eta_a_s ?? 0) + (c.eta_b_s ?? 0),
+    });
+  }
+  arr.sort((x, y) => {
+    if (x.fair !== y.fair) return x.fair - y.fair;
+    if (x.dMid !== y.dMid) return x.dMid - y.dMid;
+    if (x.total !== y.total) return x.total - y.total;
+    return x.c._idx - y.c._idx;
+  });
+  return arr.map((x) => x.c);
 }
 
-/** Rank candidates by total drive time (eta_a + eta_b ascending).
- *  Ties broken by distance to midpoint. */
+/**
+ * Rank candidates by total drive time (eta_a + eta_b ascending).
+ * Ties broken by distance to midpoint.
+ */
 export function rankByTotalDriveFromCircle(candidates, mid) {
-  const arr = [...candidates]
-    .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon))
-    .map((c, i) => {
-      const dMid = haversine(mid, c);
-      const total = (c.eta_a_s ?? 0) + (c.eta_b_s ?? 0);
-      return { c: { ...c, _idx: i }, dMid, total };
-    })
-    .sort((x, y) => {
-      if (x.total !== y.total) return x.total - y.total;
-      if (x.dMid !== y.dMid) return x.dMid - y.dMid;
-      return x.c._idx - y.c._idx;
-    })
-    .map((x) => x.c);
-  return arr;
+  const arr = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (!Number.isFinite(c.lat) || !Number.isFinite(c.lon)) continue;
+    const dMid = haversine(mid, c);
+    arr.push({
+      c: { ...c, _idx: i, _dMid: dMid },
+      dMid,
+      total: (c.eta_a_s ?? 0) + (c.eta_b_s ?? 0),
+    });
+  }
+  arr.sort((x, y) => {
+    if (x.total !== y.total) return x.total - y.total;
+    if (x.dMid !== y.dMid) return x.dMid - y.dMid;
+    return x.c._idx - y.c._idx;
+  });
+  return arr.map((x) => x.c);
 }
 
 /** "Is this candidate fair?" -- |Δ| below `thresholdS` seconds.
@@ -243,36 +258,4 @@ export const MIN_ETA_S = 90;
 export function haversineEta(distanceM, speedMps = URBAN_DRIVE_M_S) {
   if (distanceM == null || !isFinite(distanceM)) return null;
   return Math.max(MIN_ETA_S, distanceM / speedMps);
-}
-
-// ============================================================
-//  Geometry helpers used by the circle-expansion pipeline
-// ============================================================
-
-/** Bearing from a -> b in degrees (0 = north, 90 = east). */
-export function bearing(a, b) {
-  const phi1 = toRad(a.lat);
-  const phi2 = toRad(b.lat);
-  const dLam = toRad(b.lon - a.lon);
-  const y = Math.sin(dLam) * Math.cos(phi2);
-  const x = Math.cos(phi1) * Math.sin(phi2) -
-            Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLam);
-  return ((toDeg(Math.atan2(y, x)) + 360) % 360);
-}
-
-/** Offset a point by `distanceM` metres along the given bearing (degrees). */
-export function offsetPoint(p, distanceM, bearingDeg) {
-  const ang = distanceM / R_EARTH_M; // radians
-  const phi1 = toRad(p.lat);
-  const lam1 = toRad(p.lon);
-  const theta = toRad(bearingDeg);
-  const phi2 = Math.asin(
-    Math.sin(phi1) * Math.cos(ang) +
-    Math.cos(phi1) * Math.sin(ang) * Math.cos(theta)
-  );
-  const lam2 = lam1 + Math.atan2(
-    Math.sin(theta) * Math.sin(ang) * Math.cos(phi1),
-    Math.cos(ang) - Math.sin(phi1) * Math.sin(phi2)
-  );
-  return { lat: toDeg(phi2), lon: ((toDeg(lam2) + 540) % 360) - 180 };
 }

@@ -1,10 +1,11 @@
-// quick smoke: real Nominatim + OSRM + Overpass calls.
-// Run with:  node tests/smoke_live.mjs
+// quick smoke: real Nominatim + Photon + OSRM calls against the deployed
+// `/api/*` proxies. Run with:  node tests/smoke_live.mjs
 // Skipped automatically if --skip-live flag is present.
 
 import { geocode } from "../js/geocode.js";
-import { findPlaces } from "../js/places.js";
+import { findPlacesInCircle } from "../js/places.js";
 import { osrmTable } from "../js/routing.js";
+import { midpoint } from "../js/midpoint.js";
 
 const skipLive = process.argv.includes("--skip-live");
 
@@ -13,9 +14,7 @@ if (skipLive) {
   process.exit(0);
 }
 
-const results = { geocode: null, places: null, routing: null };
 let failed = 0;
-
 const check = async (name, fn) => {
   process.stdout.write(`  ${name} … `);
   try {
@@ -32,41 +31,27 @@ const check = async (name, fn) => {
 console.log("== live smoke ==\n");
 
 // Taksim + Kadıköy — two well-known Istanbul landmarks.
-results.geocode = await check("geocode Taksim", () => geocode("Taksim, Istanbul, Turkey"));
-results.geocode_b = await check("geocode Kadıköy", () => geocode("Kadıköy, Istanbul, Turkey"));
+const a = await check("geocode Taksim", () => geocode("Taksim, Istanbul, Turkey"));
+const b = await check("geocode Kadıköy", () => geocode("Kadıköy, Istanbul, Turkey"));
 
-if (results.geocode && results.geocode_b) {
-  const mid = {
-    lat: (results.geocode.lat + results.geocode_b.lat) / 2,
-    lon: (results.geocode.lon + results.geocode_b.lon) / 2,
-  };
-  console.log(`  midpoint ≈ ${mid.lat.toFixed(4)}, ${mid.lon.toFixed(4)}`);
-
-  results.places = await check("find cafes near midpoint", () =>
-    findPlaces(mid, ["cafe"], 2000)
+if (a && b) {
+  const mid = midpoint(a, b);
+  const cafes = await check("find cafes inside the midpoint circle", () =>
+    findPlacesInCircle(mid, ["cafe"], 3000)
   );
-
-  if (results.places && results.places.length > 0) {
-    console.log(`  ${results.places.length} candidates`);
-    const top3 = results.places.slice(0, 3);
-    console.log("    sample:");
-    for (const c of top3) console.log(`     • ${c.name} (${c.category})`);
-
-    results.routing = await check("OSRM /table", () =>
-      osrmTable(
-        [results.geocode, results.geocode_b],
-        top3.map((c) => [c.lon, c.lat])
-      )
+  if (cafes && cafes.length > 0) {
+    console.log(`  ${cafes.length} cafes inside 3km circle around midpoint`);
+    const top3 = cafes.slice(0, 3);
+    const r = await check("OSRM /table ETA from A, B to top-3 cafes", () =>
+      osrmTable([a, b], top3.map((c) => [c.lon, c.lat]))
     );
-
-    if (results.routing) {
-      console.log("  ETAs (A→, B→):");
+    if (r) {
+      console.log("  ETAs (from A → from B):");
       for (let i = 0; i < top3.length; i++) {
-        const a = results.routing.durations[0][i];
-        const b = results.routing.durations[1][i];
-        const aFmt = a != null ? `${(a / 60).toFixed(1)} min` : "—";
-        const bFmt = b != null ? `${(b / 60).toFixed(1)} min` : "—";
-        console.log(`     • ${top3[i].name}: ${aFmt} / ${bFmt}`);
+        const ea = r.durations?.[0]?.[i];
+        const eb = r.durations?.[1]?.[i];
+        const f = (s) => (Number.isFinite(s) && s > 0 ? `${(s / 60).toFixed(1)} min` : "—");
+        console.log(`     • ${top3[i].name}: ${f(ea)} / ${f(eb)}`);
       }
     }
   }

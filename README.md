@@ -2,51 +2,57 @@
 
 two places, one fair meeting point.
 
-type two locations, pick what kind of place you want, get a ranked list of
-spots where both people travel roughly the same time.
+type two locations, pick what kind of place you want, get a ranked list
+of spots inside a single circle drawn from the geographic midpoint —
+each with the relative drive time to both endpoints.
 
 ## what it does
 
-- geocodes free-text addresses (Nominatim + Photon via OpenStreetMap)
+- geocodes free-text addresses (Photon primary, Nominatim fallback)
 - computes the great-circle midpoint between the two inputs
-- samples anchors along the A→B line, on perpendicular corridors, on the
-  fair-zone tangent chords, and on a 3×3 bbox-grid safety net
-- asks OSRM (via /api/osrm) for driving ETA from each person to every
-  candidate
-- ranks by a fairness+axis-projection score and shows the top 10 on a map
-- lets you share a search via URL, navigate results with the keyboard,
-  and surface explanations for why each place is ranked where it is
+- draws a single circle around the midpoint at the fair-zone
+  boundary (`directM / 2`); expands it geometrically (×1.5 per step)
+  up to `maxRadiusFor(directM)` if too few POIs are inside
+- asks OSRM (via `/api/osrm`) for driving ETA from each endpoint to
+  every candidate place inside the circle
+- ranks the places and shows the top 10 with relative times to A and B
+- lets you share a search via URL, navigate results with the
+  keyboard, and click any result row or map pin to highlight the
+  matched pair in both views
 
-## ranking — what does "fair" mean?
+## ranking — the circle algorithm
 
-three sort modes are available via the tabs:
+the default sort is **closest to midpoint**: places nearer the
+geographic midpoint come first, ties broken by fairness
+(`|eta_a − eta_b|`). if the user prefers a different emphasis:
 
 | tab | criterion | tie-breaker |
 |---|---|---|
-| **fairest & closest** *(default)* | `|eta_a − eta_b|` (driving minutes) + axis-projection penalty (0.05 × off-axis metres) | distance to the geographic midpoint |
-| **most fair** | raw `|eta_a − eta_b|` | total drive time |
-| **shortest total** | `eta_a + eta_b` | order returned |
+| **closest to midpoint** *(default)* | distance from geographic midpoint | fairness (`|Δ|` seconds) |
+| **most fair** | smallest `|eta_a − eta_b|` | distance to midpoint, then total drive |
+| **shortest total** | smallest `eta_a + eta_b` | distance to midpoint |
 
-the default combines three signals. a place is **fair** when both people
-drive roughly the same time. it's **on-axis** when it sits close to the
-A→B line (geometrically, equidistant from both endpoints). and it's
-**close** when the geographic midpoint isn't far away. all three pulled
-into one score means no single dimension can dominate a clear win
-somewhere else.
+sort tabs re-sort the cached candidates instantly — no network
+round-trip.
+
+## pin ↔ list highlight
+
+clicking a pin on the map highlights the matching row in the list
+(and scrolls it into view); clicking a row pulses the matching pin.
+single shared `selectPlace(idx)` code path serves both directions.
 
 ## features
 
 - 🇹🇷 / 🇬🇧 Turkish + English UI with auto-detect
 - arrow-key navigation of the suggestion dropdown (Enter to pick)
 - keyboard shortcuts: `?` for help, `Cmd/Ctrl+K` to focus input
-- click a result row → pulse the matching pin on the map
-- hover a result row → pulse that pin (and the result's ETA badges light up)
+- click a result row → highlight the pin and pan the map
+- click a pin on the map → highlight the matching result row
 - "open in Google Maps" / "open in Apple Maps" deep links on every result
-- "explain why" sub-line showing each result's off-axis distance and Δ
 - share URL — both addresses + categories encoded, reloads to the same search
 - dark CARTO tiles matched to the pure-black theme
-- screen-reader friendly: live region announces result counts, focusable
-  results with proper aria-labels
+- screen-reader friendly: live region announces result counts,
+  focusable results with proper aria-labels
 
 ## architecture
 
@@ -55,15 +61,14 @@ somewhere else.
 │                       browser                              │
 │                                                             │
 │   app.js ───┬─── geocode.js ──→ /api/nominatim             │
-│             │                    /api/photon (POI)          │
+│             │                    /api/photon                │
 │             ├─── places.js ────→ /api/photon                │
-│             │                    /api/nominatim (POI)      │
-│             │                    /api/overpass              │
+│             │                    /api/nominatim (POI)        │
 │             ├─── routing.js ───→ /api/osrm                 │
 │             ├─── map.js ────────→ CARTO Dark Matter tiles   │
 │             ├─── i18n.js ─────── (TR / EN + persistence)    │
-│             └─── midpoint.js ── (haversine + ranking + axis │
-│                                 projection — pure, no I/O) │
+│             └─── midpoint.js ── (circle math + ranking —    │
+│                                  pure, no I/O, fully tested)│
 └───────────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────────┐
@@ -71,19 +76,16 @@ somewhere else.
 │                                                             │
 │   /api/nominatim ──→ nominatim.openstreetmap.org           │
 │   /api/photon    ──→ photon.komoot.io                      │
-│   /api/overpass  ──→ overpass.kumi.systems                 │
-│                     overpass-api.de (mirror failover)      │
-│                     overpass.osm.ch                        │
 │   /api/osrm      ──→ router.project-osrm.org               │
 └───────────────────────────────────────────────────────────┘
 ```
 
 the proxy layer sidesteps two CORS issues: (1) browsers can't reach some
-upstreams from Vercel's edge IPs because of cross-site rules, and (2) the
-upstreams rate-limit edge IPs faster than browser IPs. running the calls
-server-to-server gets a stable connection at the cost of one extra
-hop per request. in exchange, every endpoint has its own
-`max-age` cache, so repeat searches hit Vercel's CDN.
+upstreams from Vercel's edge IPs because of cross-site rules, and (2)
+the upstreams rate-limit edge IPs faster than browser IPs. running the
+calls server-to-server gets a stable connection at the cost of one
+extra hop per request. each endpoint has its own `max-age` cache so
+repeat searches hit Vercel's CDN.
 
 ## run locally
 
@@ -98,14 +100,13 @@ python3 -m http.server 8080
 # → http://localhost:8080/
 ```
 
-geolocation requires https (or `http://localhost`). Vercel gives you https
-for free on deploy.
+geolocation requires https (or `http://localhost`). Vercel gives you
+https for free on deploy.
 
 ## test
 
 ```bash
-node tests/test_midpoint.mjs     # offline — haversine + ranking math
-node tests/smoke_live.mjs        # live — proxies + upstreams
+node tests/test_midpoint.mjs     # offline — circle math + 41 unit tests
 ```
 
 ## deploy to vercel
@@ -119,16 +120,16 @@ vercel          # first time — answers prompts, links to vercel
 vercel --prod   # promote to production
 ```
 
-or just import the github repo at <https://vercel.com/new> and it'll pick
-up the `vercel.json` automatically.
+or just import the github repo at <https://vercel.com/new> and it'll
+pick up the `vercel.json` automatically.
 
 ## data sources
 
 | purpose | service |
 |---|---|
-| geocode (forward)  | <https://nominatim.openstreetmap.org> (proxy) + Photon fallback |
-| geocode (reverse)  | Photon primary, Nominatim fallback |
-| places (POI)       | Photon (primary), Nominatim, Overpass (mirrored) |
+| geocode (forward)  | Photon (primary) + Nominatim |
+| geocode (reverse)  | Photon (primary) + Nominatim |
+| places (POI)       | Photon (primary) + Nominatim |
 | routing (ETA)      | <https://router.project-osrm.org> |
 | map tiles          | CARTO Dark Matter (free for low traffic) |
 | map library        | <https://leafletjs.org> (cdn) |
@@ -139,12 +140,13 @@ up the `vercel.json` automatically.
 - no server-side storage of your searches
 - the only calls leaving your browser are to the public OSM/OSRM/CARTO
   services (proxied via `/api/*` to bypass CORS / rate-limits)
-- shared URLs are stored entirely in the URL fragment — they're never
-  sent to any server we control
+- shared URLs are stored entirely in the URL query string — they're
+  never sent to any server we control
 
 ## license
 
 mit
+
 
 ```
 MIT License

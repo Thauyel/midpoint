@@ -5,9 +5,9 @@
 //  v4: pure circle-from-midpoint algorithm. One anchor, expanding radius.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=41";
-import { findPlacesInCircle, findPlacesAlways } from "./places.js?v=41";
-import { osrmTable } from "./routing.js?v=41";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=42";
+import { findPlacesInCircle, findPlacesAlways } from "./places.js?v=42";
+import { osrmTable } from "./routing.js?v=42";
 import {
   midpoint,
   rankByCircleDistance,
@@ -20,10 +20,9 @@ import {
   haversineEta,
   baseRadiusFor,
   expandSteps,
-  circleRadiusFor,
-} from "./midpoint.js?v=41";
-import { MidpointMap } from "./map.js?v=41";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=41";
+} from "./midpoint.js?v=42";
+import { MidpointMap } from "./map.js?v=42";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=42";
 
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
 const MAX_RESULTS = 10;          // how many to render
@@ -35,8 +34,8 @@ const SUGGEST_MIN_CHARS = 2;
 // ----- state -----
 const state = {
   sides: {
-    a: { input: null, meta: null, point: null, busy: false, suggestions: [], reqSeq: 0 },
-    b: { input: null, meta: null, point: null, busy: false, suggestions: [], reqSeq: 0 },
+    a: { meta: null, point: null, suggestions: [], reqSeq: 0 },
+    b: { meta: null, point: null, suggestions: [], reqSeq: 0 },
   },
   categories: new Set(DEFAULT_CATEGORIES),
   finding: false,
@@ -47,7 +46,6 @@ const state = {
   a: null,
   b: null,
   searchRadius: null,   // radius (metres) of the circle we searched, for re-sorting
-  shareOn: false,
   suggestFocus: null,  // { side, idx } for arrow-key nav
   selectedIdx: null,    // row/pin index currently highlighted (from click)
 };
@@ -475,9 +473,10 @@ async function runPipeline() {
     for (let s = 0; s < steps.length; s++) {
       if (searchCtl.signal.aborted) break;
       const r = steps[s];
-      // Photon handles the single-circle case directly. We give it a
-      // generous viewport so it returns the closest hits within `r` even
-      // if some cafe sits exactly on the boundary.
+      // Photon handles the single-circle case directly. findPlacesInCircle
+      // already dedupes by ~30m across Photon + Nominatim; we add another
+      // dedup layer across expansion steps so step k+1 doesn't re-add
+      // places that step k already returned.
       const more = await findPlacesInCircle(mid, cats, r, { signal: searchCtl.signal });
       for (const p of more) {
         const dupe = allPlaces.some(
@@ -584,10 +583,11 @@ function renderResults(ranked) {
       ? `<span class="fair-badge">${t("fair")}</span>`
       : `<span class="fair-badge unfair">${t("unfair", fmtEta(delta))}</span>`;
 
-    // Build the explain-why string: Δ and distance-to-mid. Simpler than v3
-    // -- the circle-based algorithm doesn't need axis-projection since the
-    // search itself is bounded by the circle.
-    const distMid = state.mid ? haversine(state.mid, r) : 0;
+    // Use pre-computed _dMid from the ranker (single computation, reused
+    // by every spot that needs the distance). Falls back to haversine if
+    // we're rendering a candidate that wasn't ranked (shouldn't happen
+    // in v4, but safe).
+    const distMid = r._dMid ?? (state.mid ? haversine(state.mid, r) : 0);
     const etaA = fmtEta(r.eta_a_s);
     const etaB = fmtEta(r.eta_b_s);
     const explain = `Δ ${fmtEta(delta)} · ${fmtDist(distMid)} from mid`;
@@ -809,10 +809,11 @@ function readShareUrl() {
 }
 
 function writeShareUrl() {
-  const s = state.sides.a.point && state.sides.b.point;
-  if (!s) return false;
-  const a = state.sides.a.input.value.trim();
-  const b = state.sides.b.input.value.trim();
+  if (!state.sides.a.point || !state.sides.b.point) return false;
+  // Read from the DOM (state.sides.*.input was removed; the inputs are
+  // the source of truth the user sees).
+  const a = els.inputA.value.trim();
+  const b = els.inputB.value.trim();
   if (!a || !b) return false;
   const cats = [...state.categories].join(",");
   const url = new URL(location.href);
@@ -834,22 +835,17 @@ function writeShareUrl() {
 
 // Restore from URL on first load, ONCE the geocoders are ready. We mark
 // the inputs with the saved text and let the existing input handlers
-// run the geocode; once both sides have points, we fire runPipeline if
-// the user came here with a real saved pair.
-function restoreFromShareUrl() {
+// run the geocode; once both sides have points, we fire runPipeline.
+async function restoreFromShareUrl() {
   const share = readShareUrl();
   if (!share.a || !share.b) return;
   if (els.inputA.value !== share.a) els.inputA.value = share.a;
   if (els.inputB.value !== share.b) els.inputB.value = share.b;
   // Apply saved categories (preserve defaults if not specified)
   if (share.cats.length > 0) {
-    // Clear all then add the saved ones
-    for (const cat of state.categories) {
-      // ... we need to toggle off, but state.categories starts at DEFAULT_CATEGORIES
-    }
-    // Simplify: re-set state and chip UI
+    // Preserve the order saved by the sharer; just add what's listed.
     state.categories.clear();
-    share.cats.forEach((c) => state.categories.add(c));
+    for (const c of share.cats) state.categories.add(c);
     els.chips.forEach((chip) => {
       const on = state.categories.has(chip.dataset.cat);
       chip.classList.toggle("is-on", on);
@@ -861,22 +857,26 @@ function restoreFromShareUrl() {
     const tab = document.querySelector(`.sort-tab[data-sort="${share.sort}"]`);
     if (tab) tab.click();
   }
-  // Geocode both via the same handler the live input uses. They fire in
-  // parallel and each will call setMeta + show a dropdown when done.
+  // Geocode both sides in parallel. The debounced input handler already
+  // exists; we call it directly to bypass the 350ms typing pause.
   onInputA(); onInputB();
-  // Watchdog: if the geocoders resolve and both sides get points, kick
-  // off the pipeline automatically. 12s budget -- if Photon is slow we
-  // don't want to wait forever.
-  let ticks = 0;
-  const ticker = setInterval(() => {
-    ticks++;
-    if (state.sides.a.point && state.sides.b.point && !state.finding) {
-      clearInterval(ticker);
-      runPipeline();
-      return;
-    }
-    if (ticks > 60) clearInterval(ticker);
-  }, 200);
+  // Poll for completion -- the geocoder code path assigns
+  // state.sides.*.point when a suggestion is picked (or none exists).
+  // 200ms cadence over 12s budget is plenty; we use setTimeout chains
+  // (not setInterval) so the timer doesn't drift.
+  await new Promise((resolve) => {
+    let ticks = 0;
+    const check = () => {
+      ticks++;
+      if (state.sides.a.point && state.sides.b.point) { resolve(); return; }
+      if (ticks >= 60) { resolve(); return; }   // 60 * 200ms = 12s budget
+      setTimeout(check, 200);
+    };
+    check();
+  });
+  if (state.sides.a.point && state.sides.b.point && !state.finding) {
+    runPipeline();
+  }
 }
 
 // Wire share button
@@ -927,7 +927,11 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ============================================================
-//  result-list keyboard navigation (↑/↓ to move highlight, Enter to focus map)
+//  result-list keyboard navigation (↑/↓ to move highlight, Home/End
+//  to jump, Enter to focus pin on map). We deliberately do NOT auto-
+//  click the row on arrow move -- that would fire selectPlace +
+//  map.flyTo on every keystroke, which is jarring. Users press
+//  Enter or click if they want the map to pan.
 // ============================================================
 els.resultList.addEventListener("keydown", (e) => {
   const rows = [...els.resultList.querySelectorAll(".result")];
@@ -938,7 +942,10 @@ els.resultList.addEventListener("keydown", (e) => {
     const dir = e.key === "ArrowDown" ? 1 : -1;
     const next = (cur + dir + rows.length) % rows.length;
     rows[next].focus();
-    rows[next].click();
+  } else if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    const i = cur >= 0 ? cur : 0;
+    if (rows[i]) rows[i].click();
   } else if (e.key === "Home") {
     e.preventDefault();
     rows[0].focus();
@@ -955,12 +962,3 @@ if (readShareUrl().a && readShareUrl().b) {
   // wait for Leaflet + DOM, then restore
   setTimeout(restoreFromShareUrl, 100);
 }
-
-// ============================================================
-//  third-person toggle ("meet in the middle of A and B" -- if anyone
-//  else is invited, the midpoint shifts toward them too).
-// ============================================================
-// Hooked up here in case a future design adds a third input -- the data
-// structures above already accommodate it (ranker takes a & b, we could
-// pass c too). For now this is a no-op reserved hook so we don't break
-// the URL/share flow.
