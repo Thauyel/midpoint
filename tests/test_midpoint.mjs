@@ -12,6 +12,7 @@ import {
   rankByFairness,
   rankByFairnessFirst,
   rankByMidpointDistance,
+  rankByFairestFromMid,
   rankByTotalDrive,
   isFair,
   haversineEta,
@@ -342,6 +343,65 @@ test("rankByFairnessFirst places a fair point ahead of an unfair one even if tot
   if (ranked[0] === c || ranked[2] === c) {
     throw new Error(`expected c (unfair) last, got order [${ranked.map(r => r.eta_a_s).join(", ")}]`);
   }
+});
+
+console.log("\n== rankByFairestFromMid (default sort) ==");
+
+test("rankByFairestFromMid prefers fair places, with closeness-to-mid as tiebreaker", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  // Both ~same distance from M, but one is fair and one is unfair.
+  // The fair one should win despite identical distance-to-mid.
+  const fairNear   = { lat: 41.005, lon: 29.005, eta_a_s: 900, eta_b_s: 900 };  // fair, |Δ|=0
+  const unfairNear = { lat: 41.005, lon: 29.005, eta_a_s: 200, eta_b_s: 800 };  // 600s from same spot
+  const ranked = rankByFairestFromMid([unfairNear, fairNear], mid);
+  if (ranked[0].eta_a_s !== 900) {
+    throw new Error(`expected fair first (with Δ=0), got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByFairestFromMid falls back to dist-to-mid when no ETAs", () => {
+  // The default ranker must still work even if candidates don't carry ETAs
+  // (the OSRM call might have failed for some or all of them).
+  const mid = { lat: 41.0, lon: 29.0 };
+  const near = { lat: 41.001, lon: 29.001 };
+  const far  = { lat: 41.05,  lon: 29.05 };
+  const ranked = rankByFairestFromMid([far, near], mid);
+  if (ranked[0].lat !== near.lat) {
+    throw new Error(`expected near first when no ETAs, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByFairestFromMid breaks fairness ties by closeness-to-mid", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  // Two equally fair places, one near M and one far.
+  // The near one should win.
+  const fairFar  = { lat: 41.10, lon: 29.10, eta_a_s: 600, eta_b_s: 600 };  // 14km away, fair
+  const fairNear = { lat: 41.01, lon: 29.01, eta_a_s: 600, eta_b_s: 600 };  // 1.4km away, fair
+  const ranked = rankByFairestFromMid([fairFar, fairNear], mid);
+  if (ranked[0].lat !== fairNear.lat) {
+    throw new Error(`expected near-and-fair first when both are equally fair, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByFairestFromMid does NOT prefer a closer-to-mid but highly-unfair place", () => {
+  // The bug we're fixing: an unfair place 1km from M beating a fair place 5km from M.
+  const mid = { lat: 41.0, lon: 29.0 };
+  const nearUnfair = { lat: 41.001, lon: 29.001, eta_a_s: 60, eta_b_s: 1740 };  // near M, very unfair
+  const farFair    = { lat: 41.05,  lon: 29.05,  eta_a_s: 600, eta_b_s: 600 }; // far from M, perfectly fair
+  const ranked = rankByFairestFromMid([nearUnfair, farFair], mid);
+  // The far-but-fair one wins (rankByFairestFromMid prioritises fairness).
+  if (ranked[0].lat !== farFair.lat) {
+    throw new Error(`expected far-but-fair to beat near-but-unfair, got ${JSON.stringify(ranked[0])}`);
+  }
+});
+
+test("rankByFairestFromMid returns original candidates (stable) when ETAs available", () => {
+  const mid = { lat: 41.0, lon: 29.0 };
+  const c1 = { lat: 41.0, lon: 29.0, eta_a_s: 600, eta_b_s: 600, _idx: 0 };
+  const c2 = { lat: 41.01, lon: 29.01, eta_a_s: 600, eta_b_s: 600, _idx: 1 };
+  const ranked = rankByFairestFromMid([c1, c2], mid);
+  if (ranked.length !== 2) throw new Error(`expected 2 candidates back, got ${ranked.length}`);
+  if (!("_idx" in ranked[0])) throw new Error(`expected _idx preserved for stable sort`);
 });
 
 console.log(`\nResults: ${passed} passed, ${failed} failed`);

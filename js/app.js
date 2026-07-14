@@ -6,9 +6,9 @@
 import { geocode, reverse as reverseGeocode } from "./geocode.js?v=36";
 import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=36";
 import { osrmTable } from "./routing.js?v=35";
-import { midpoint, rankByFairness, rankByFairnessFirst, rankByMidpointDistance, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=35";
+import { midpoint, rankByFairness, rankByFairnessFirst, rankByFairestFromMid, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=37";
 import { MidpointMap } from "./map.js?v=35";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=35";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=37";
 
 const RADIUS_M = 1500;           // BASE per-anchor POI search radius (overridden per-call by length-aware scaling)
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
@@ -459,9 +459,11 @@ async function runPipeline() {
       };
     });
 
-    // Rank: default to "closest to midpoint" (what users actually want when
-    // they say "near the middle"). Other modes ("fair", "total") are available
-    // via the sort tabs -- toggling just re-sorts the same set, no re-fetch.
+    // Rank: default to "fairest & closest to midpoint" -- a place that's
+    // roughly equidistant from BOTH endpoints AND not 30km off the axis
+    // (which pure fairness could pick). Other modes ("most fair", "shortest
+    // total") are available via the sort tabs -- toggling just re-sorts the
+    // same set, no re-fetch.
     state.allCandidates = enriched;
     const ranked = applySort(enriched, state.sortMode, mid).slice(0, MAX_RESULTS);
     state.results = ranked;
@@ -668,7 +670,7 @@ els.aboutBtn.addEventListener("click", () => {
 function applySort(candidates, mode, mid) {
   if (mode === "fair")   return rankByFairnessFirst(candidates);
   if (mode === "total")  return rankByTotalDrive(candidates);
-  return rankByMidpointDistance(candidates, mid); // default
+  return rankByFairestFromMid(candidates, mid); // default
 }
 
 // Re-sort whenever a sort tab is clicked. Uses cached `allCandidates`

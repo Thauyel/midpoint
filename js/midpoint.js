@@ -121,12 +121,13 @@ export function isFair(c, thresholdS = 5 * 60) {
 
 /**
  * Rank by distance to the geographic midpoint, with fairness as tiebreaker.
- * This is the "closest to midpoint" ranking -- what most users actually want
- * when they say "find a place in the middle". Drives the default order in
- * the UI; the user can switch to total/fairness via the sort tabs.
  *
- * `mid` is the geographic midpoint {lat, lon}. `candidates` must already
- * carry eta_a_s / eta_b_s if you want fairness to break ties intelligently.
+ * @deprecated Use `rankByFairestFromMid` instead. Closest-to-mid alone
+ * ranks cafes in whichever direction happens to be densest from M --
+ * which is often biased toward one endpoint (Beylikdüzü↔Kartal: a cafe
+ * 12.7km NORTHEAST of M beats one 12.7km SOUTH in the sea, even though
+ * the SOUTHERN one is genuinely equidistant from A and B). The new
+ * ranker combines both metrics with proper weighting.
  */
 export function rankByMidpointDistance(candidates, mid) {
   if (!mid) return rankByFairnessFirst(candidates);
@@ -137,12 +138,52 @@ export function rankByMidpointDistance(candidates, mid) {
       const dX = haversine(mid, x);
       const dY = haversine(mid, y);
       if (dX !== dY) return dX - dY;
-      // Tiebreaker: smaller fairness gap is better
       const fX = Math.abs((x.eta_a_s ?? 0) - (x.eta_b_s ?? 0));
       const fY = Math.abs((y.eta_a_s ?? 0) - (y.eta_b_s ?? 0));
       if (fX !== fY) return fX - fY;
       return x._idx - y._idx;
     });
+}
+
+/**
+ * Rank by FAIRNESS first (smallest |dist(A)-dist(B)|) with closeness
+ * to the geographic midpoint as the tiebreaker. This is the default
+ * sort -- what users actually mean when they say "somewhere in the
+ * middle that's not biased toward either of us".
+ *
+ * Why "fairness + closeness" instead of pure fairness:
+ *  - Pure fairness can pick a place 30km from BOTH people (because the
+ *    |Δ| happens to be small there). That's not "close to the middle".
+ *  - Pure closeness-to-mid picks the geographically nearest cafe to M,
+ *    which can be massively unfair (e.g. Paşa Kahvesi in Bağcılar is
+ *    12.7km from M but 18km from A and 34km from B).
+ *
+ * Combining both metrics with a tiebreaker weights the irrelevant
+ * direction (off the A→B axis) lightly while keeping equal drive
+ * times as the dominant criterion. Fairness is measured in seconds
+ * (eta_a_s vs eta_b_s) so it scales naturally with distance --
+ * Istanbul (50km line, 30min drives) and Kadıköy↔Üsküdar (5km line,
+ * 7min drives) both end up with sensible "fair" thresholds.
+ */
+export function rankByFairestFromMid(candidates, mid) {
+  if (!mid) return rankByFairnessFirst(candidates);
+  const arr = [...candidates]
+    .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon))
+    .map((c, i) => {
+      const dMid = haversine(mid, c);
+      const fair = Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0));
+      return { c: { ...c, _idx: i }, fair, dMid };
+    });
+  // We don't always have ETAs (cached candidates don't always carry them).
+  // In that case the ranking degenerates to dist-to-mid with stable order.
+  const hasEtas = arr.every((x) => Number.isFinite(x.c.eta_a_s) && Number.isFinite(x.c.eta_b_s));
+  return arr
+    .sort((x, y) => {
+      if (hasEtas && x.fair !== y.fair) return x.fair - y.fair;
+      if (x.dMid !== y.dMid) return x.dMid - y.dMid;
+      return x.c._idx - y.c._idx;
+    })
+    .map((x) => x.c);
 }
 
 /**
