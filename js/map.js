@@ -31,11 +31,15 @@ export class MidpointMap {
       worldCopyJump: true,
       attributionControl: true,
     });
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // CARTO Dark Matter matches the pure-black UI and stays readable in
+    // both light and dim rooms. Free for <75k tile requests/day, sufficient
+    // for personal use.
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
       maxZoom: 19,
       minZoom: 3,
-      attribution: "© OpenStreetMap contributors",
+      attribution: "© OpenStreetMap contributors © CARTO",
       crossOrigin: true,
+      subdomains: "abcd",
     }).addTo(this.map);
 
     this.markers = { a: null, b: null, mid: null, places: [] };
@@ -71,6 +75,20 @@ export class MidpointMap {
   clearPlaces() {
     for (const m of this.markers.places) this.map.removeLayer(m);
     this.markers.places = [];
+  }
+
+  /**
+   * Highlight a single place marker. Used when the user hovers a result row
+   * or focuses it via keyboard. `on=true` adds the `is-pulse` class for a
+   * brief attention-grab; `on=false` removes it.
+   */
+  focusPlace(idx, on) {
+    const m = this.markers.places[idx];
+    if (!m || !m.getElement) return;
+    const inner = m.getElement().querySelector(".place-marker");
+    if (!inner) return;
+    inner.classList.toggle("is-pulse", !!on);
+    inner.classList.toggle("is-hover", !!on);
   }
 
   addPlace(place, idx, opts = {}) {

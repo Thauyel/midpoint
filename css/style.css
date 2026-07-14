@@ -249,9 +249,9 @@ body {
   background: var(--bg-elev);
   outline: none;
 }
-.suggestion.is-active,
-.suggestion[aria-selected="true"] {
+.suggestion.is-focused {
   background: var(--accent-soft);
+  outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
 }
 .sugg-icon {
   width: 22px; height: 22px;
@@ -566,16 +566,20 @@ body {
   border-radius: var(--radius);
   padding: 12px 14px;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   gap: 12px;
   align-items: center;
   transition: transform 160ms var(--tap), border-color 160ms var(--tap), background 160ms var(--tap);
   cursor: pointer;
 }
-.result:hover {
+.result:hover,
+.result:focus,
+.result:focus-visible {
   transform: translateY(-1px);
   border-color: var(--line-2);
   background: var(--bg-elev);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .result.is-top {
   border-color: var(--accent-dim);
@@ -750,3 +754,107 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ============================================================
+   v3 additions
+   ============================================================ */
+
+/* Screen-reader-only live region. The user doesn't see it but the
+   text is announced when it changes. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* "explain why" sub-line on result rows */
+.result-explain {
+  font-size: 11px;
+  color: var(--fg-quiet);
+  font-family: var(--mono);
+  display: block;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* "open in Google/Apple Maps" action buttons inside each result row */
+.result-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.result-actions .map-link {
+  width: 28px; height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-dim);
+  text-decoration: none;
+  border-radius: 6px;
+}
+.result-actions .map-link:hover {
+  color: var(--fg);
+  background: var(--line);
+}
+
+/* Pulsing animation for the place-marker when a result row is hovered */
+@keyframes place-pulse {
+  0%   { transform: scale(1); box-shadow: 0 0 0 0 var(--accent); }
+  60%  { transform: scale(1.4); box-shadow: 0 0 0 14px transparent; }
+  100% { transform: scale(1.2); box-shadow: 0 0 0 0 transparent; }
+}
+.place-marker.is-hover,
+.place-marker.is-pulse {
+  animation: place-pulse 1100ms var(--tap);
+}
+.place-marker.is-hover {
+  background: var(--accent);
+  color: var(--bg);
+  transform: scale(1.2);
+}
+
+/* Keyboard-shortcut "kbd" element visual */
+kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line-3);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--fg);
+  min-width: 18px;
+  display: inline-block;
+  text-align: center;
+}
+.kbd-table {
+  border-collapse: collapse;
+  margin-top: 8px;
+  width: 100%;
+}
+.kbd-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.kbd-table td:first-child {
+  width: 36%;
+  white-space: nowrap;
+}
+.kbd-table tr:last-child td { border-bottom: 0; }
+
+/* Footer link rows live in a row so the about/shortcuts/share buttons sit side-by-side */
+.footbar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.foot-link { padding: 4px 10px; font-size: 12px; }

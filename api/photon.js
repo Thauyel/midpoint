@@ -7,6 +7,7 @@
 // ============================================================
 
 const ENDPOINT = "https://photon.komoot.io";
+const FETCH_TIMEOUT_MS = 6000;   // Photon is typically <500ms; >6s means trouble
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -20,16 +21,25 @@ export default async function handler(req, res) {
     if (v != null) url.searchParams.set(k, String(v));
   }
 
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
     const upstream = await fetch(url, {
       headers: { "Accept": "application/json" },
+      signal: ctl.signal,
     });
+    clearTimeout(timer);
     const body = await upstream.text();
     res.status(upstream.status);
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
     res.setHeader("Cache-Control", "public, max-age=60, s-maxage=300");
     res.send(body);
   } catch (e) {
-    res.status(502).json({ error: "upstream_unreachable", message: String(e?.message || e) });
+    clearTimeout(timer);
+    const isTimeout = e?.name === "AbortError";
+    res.status(isTimeout ? 504 : 502).json({
+      error: isTimeout ? "photon_timeout" : "photon_unreachable",
+      message: String(e?.message || e),
+    });
   }
 }

@@ -6,6 +6,7 @@
 // ============================================================
 
 const ENDPOINT = "https://router.project-osrm.org";
+const FETCH_TIMEOUT_MS = 12000;
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -22,16 +23,25 @@ export default async function handler(req, res) {
 
   const upstream_url = `${ENDPOINT}${path}${qs.toString() ? "?" + qs.toString() : ""}`;
 
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
     const upstream = await fetch(upstream_url, {
       headers: { "User-Agent": "midpoint-app/1.0 (https://midpoint-rust.vercel.app)" },
+      signal: ctl.signal,
     });
+    clearTimeout(timer);
     const body = await upstream.text();
     res.status(upstream.status);
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
     res.setHeader("Cache-Control", "public, max-age=120, s-maxage=600");
     res.send(body);
   } catch (e) {
-    res.status(502).json({ error: "upstream_unreachable", message: String(e?.message || e) });
+    clearTimeout(timer);
+    const isTimeout = e?.name === "AbortError";
+    res.status(isTimeout ? 504 : 502).json({
+      error: isTimeout ? "osrm_timeout" : "osrm_unreachable",
+      message: String(e?.message || e),
+    });
   }
 }

@@ -169,6 +169,39 @@ function makeError(code, message) {
   return e;
 }
 
+/**
+ * Best-effort country-code detection from a free-text query. Returns
+ * the ISO 3166-1 alpha-2 country code (lowercase, Nominatim's expected
+ * format) if the query strongly mentions a country or a major city
+ * that's clearly tied to one country, else null.
+ *
+ * Used to push Nominatim's `countrycodes` parameter so ambiguous
+ * names like "Kadıköy" / "Berlin, MD" / "Springfield" resolve to
+ * the right country on the first try.
+ */
+const COUNTRY_HINTS = [
+  // Multi-word or unambiguous
+  { rx: /\b(turkey|turkiye|türkiye)\b/i, code: "tr" },
+  { rx: /\b(united kingdom|uk|england|wales|scotland|northern ireland)\b/i, code: "gb" },
+  { rx: /\b(united states|usa|u\.s\.a\.)\b/i, code: "us" },
+  // Cities unambiguous to country
+  { rx: /\b(istanbul|ankara|izmir|antalya|adana|bursa)\b/i, code: "tr" },
+  { rx: /\b(london|manchester|liverpool|edinburgh|cardiff)\b/i, code: "gb" },
+  { rx: /\b(new york|los angeles|chicago|houston|boston|philadelphia|san francisco|seattle|denver|austin)\b/i, code: "us" },
+  { rx: /\b(berlin|munich|münchen|hamburg|frankfurt|cologne|köln|stuttgart|düsseldorf)\b/i, code: "de" },
+  { rx: /\b(paris|marseille|lyon|bordeaux|toulouse|nice)\b/i, code: "fr" },
+  { rx: /\b(madrid|barcelona|valencia|seville|sevilla|bilbao)\b/i, code: "es" },
+  { rx: /\b(rome|milan|milano|naples|napoli|turin|torino|florence|firenze)\b/i, code: "it" },
+  { rx: /\b(tokyo|osaka|kyoto|yokohama)\b/i, code: "jp" },
+  { rx: /\b(moscow|st petersburg|saint petersburg|kazan)\b/i, code: "ru" },
+];
+function detectCountryCode(query) {
+  for (const { rx, code } of COUNTRY_HINTS) {
+    if (rx.test(query)) return code;
+  }
+  return null;
+}
+
 // ============================================================
 //  Photon geocoder (https://photon.komoot.io)
 // ============================================================
@@ -275,6 +308,11 @@ async function nominatimGeocode(query, limit, signal) {
       url.searchParams.set("limit", String(limit));
       url.searchParams.set("addressdetails", "0");
       url.searchParams.set("dedupe", "1");
+      // Push toward the dominant country of the search query when we
+      // can detect it. "Kadıköy" alone could resolve to Hungary;
+      // "Kadıköy, Turkey" should resolve to Istanbul.
+      const ccode = detectCountryCode(query);
+      if (ccode) url.searchParams.set("countrycodes", ccode);
       const res = await fetch(url, {
         method: "GET",
         headers: HEADERS,

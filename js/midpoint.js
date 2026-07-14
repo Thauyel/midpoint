@@ -120,6 +120,45 @@ export function isFair(c, thresholdS = 5 * 60) {
 }
 
 /**
+ * Perpendicular distance from `p` to the great-circle line through
+ * a→b, in metres. Returns the same answer as `haversine` of the
+ * projected point but avoids recomputing the projection point when
+ * the caller already needs the `alongM` (signed distance along the
+ * line) component.
+ *
+ * Returns `{ alongM, perpM }`. `alongM` is signed in metres along the
+ * A→B line (0 at A, positive toward B). `perpM` is the unsigned
+ * perpendicular distance from the line -- this is the metric of how
+ * "off the axis" the candidate is.
+ */
+export function projectOntoAxis(a, b, p) {
+  // Compute in a local ENU plane around point a. For sub-100km
+  // distances this is accurate to within a few metres; for our use
+  // case (search areas of a few km), this is plenty.
+  //
+  // Convert degrees to radians before multiplying by R (Earth radius)
+  // -- a common bug when porting this from formulas that assumed
+  // lat/lon-in-radians. We use the local radius at lat a: east-west
+  // distance per radian of longitude is R * cos(lat), north-south
+  // is just R.
+  const cosLat = Math.cos(toRad(a.lat));
+  const dx = toRad(b.lon - a.lon) * R_EARTH_M * cosLat;  // E (metres)
+  const dy = toRad(b.lat - a.lat) * R_EARTH_M;           // N (metres)
+  const px = toRad(p.lon - a.lon) * R_EARTH_M * cosLat;
+  const py = toRad(p.lat - a.lat) * R_EARTH_M;
+  const L2 = dx * dx + dy * dy;
+  if (L2 < 1) return { alongM: 0, perpM: Math.hypot(px, py) };
+  // t in [0, 1] along the line, then distance along line is t * sqrt(L2)
+  const t = (px * dx + py * dy) / L2;
+  const alongM = t * Math.sqrt(L2);
+  // closest point on the line in local coords
+  const cx = t * dx;
+  const cy = t * dy;
+  const perpM = Math.hypot(px - cx, py - cy);
+  return { alongM, perpM };
+}
+
+/**
  * Rank by distance to the geographic midpoint, with fairness as tiebreaker.
  *
  * @deprecated Use `rankByFairestFromMid` instead. Closest-to-mid alone
@@ -164,22 +203,52 @@ export function rankByMidpointDistance(candidates, mid) {
  * (eta_a_s vs eta_b_s) so it scales naturally with distance --
  * Istanbul (50km line, 30min drives) and Kadıköy↔Üsküdar (5km line,
  * 7min drives) both end up with sensible "fair" thresholds.
+ *
+ * On top of the existing fairness+closeness score, we ALSO project
+ * each candidate onto the A→B axis. A place ON this axis is, by
+ * geometry, equidistant from both A and B -- the closer to the
+ * midpoint along the axis, the fairer in pure geographic terms.
+ * Subtract a small `axisBonus` from the fairness score proportional
+ * to that projection, so a "on the line near mid" place beats an
+ * "off the line slightly unfair" place even when |Δ| is similar.
  */
-export function rankByFairestFromMid(candidates, mid) {
+export function rankByFairestFromMid(candidates, mid, a, b) {
   if (!mid) return rankByFairnessFirst(candidates);
   const arr = [...candidates]
     .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon))
     .map((c, i) => {
       const dMid = haversine(mid, c);
       const fair = Math.abs((c.eta_a_s ?? 0) - (c.eta_b_s ?? 0));
-      return { c: { ...c, _idx: i }, fair, dMid };
+      // Axis projection -- expressed in metres. 0 = exactly on the
+      // A->B line, large values mean "off to one side". When a & b
+      // are provided we can compute it precisely; otherwise 0.
+      let onAxis = 0;
+      if (a && b) {
+        onAxis = Math.abs(projectOntoAxis(a, b, c).perpM);
+      }
+      // Combine into a single "effective unfairness" score:
+      //   score = |Δ| seconds  +  0.05 × off-axis-metres
+      //
+      // 0.05 × 1m = 0.05s. So:
+      //   - on-axis (perpM=0) scores exactly |Δ|: pure ETA fairness
+      //   - 100m off-axis adds 5s (more unfair)
+      //   - 1km off-axis adds 50s (~1 min equivalent)
+      //   - 5km off-axis adds 250s (~4 min equivalent)
+      //
+      // Tuned so that for Istanbul (50km line) being 2km off-axis
+      // is approximately equivalent to 100s of raw ETA imbalance --
+      // enough to break ties toward on-axis candidates while still
+      // letting a 50s-|Δ| place 5km off-axis beat a 350s-|Δ|
+      // place on-axis.
+      const score = fair + 0.05 * onAxis;
+      return { c: { ...c, _idx: i }, score, fair, dMid, onAxis };
     });
   // We don't always have ETAs (cached candidates don't always carry them).
-  // In that case the ranking degenerates to dist-to-mid with stable order.
+  // In that case fall back to dist-to-mid (the ranker used to be).
   const hasEtas = arr.every((x) => Number.isFinite(x.c.eta_a_s) && Number.isFinite(x.c.eta_b_s));
   return arr
     .sort((x, y) => {
-      if (hasEtas && x.fair !== y.fair) return x.fair - y.fair;
+      if (hasEtas && x.score !== y.score) return x.score - y.score;
       if (x.dMid !== y.dMid) return x.dMid - y.dMid;
       return x.c._idx - y.c._idx;
     })

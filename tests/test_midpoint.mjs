@@ -24,6 +24,7 @@ import {
   corridorAnchors,
   tangentChordAnchors,
   expandingAnchors,
+  projectOntoAxis,
 } from "../js/midpoint.js";
 
 let passed = 0;
@@ -402,6 +403,70 @@ test("rankByFairestFromMid returns original candidates (stable) when ETAs availa
   const ranked = rankByFairestFromMid([c1, c2], mid);
   if (ranked.length !== 2) throw new Error(`expected 2 candidates back, got ${ranked.length}`);
   if (!("_idx" in ranked[0])) throw new Error(`expected _idx preserved for stable sort`);
+});
+
+console.log("\n== projectOntoAxis ==");
+
+test("projectOntoAxis: point exactly ON A->B line has perpM ≈ 0", () => {
+  const a = { lat: 41.0, lon: 29.0 };
+  const b = { lat: 41.05, lon: 29.05 };
+  // midpoint between a and b - should have perpM ≈ 0
+  const mid = { lat: 41.025, lon: 29.025 };
+  const proj = projectOntoAxis(a, b, mid);
+  if (proj.perpM > 1) throw new Error(`expected perpM ≈ 0 for point on line, got ${proj.perpM}`);
+});
+
+test("projectOntoAxis: point perpendicular 1km off the line has perpM ≈ 1000", () => {
+  const a = { lat: 41.0, lon: 29.0 };
+  const b = { lat: 41.0, lon: 29.06 };   // due east line (lon increases, lat constant)
+  // 0.009° = ~1km due north of a point on the line -- perpendicular to the line
+  const onLine = { lat: 41.0, lon: 29.03 };
+  const offAxis = { lat: 41.009, lon: 29.03 };
+  const proj = projectOntoAxis(a, b, offAxis);
+  if (Math.abs(proj.perpM - 1000) > 50) {
+    throw new Error(`expected perpM ≈ 1000m, got ${proj.perpM.toFixed(0)}`);
+  }
+});
+
+test("projectOntoAxis: alongM is signed correctly (negative in front of A, positive beyond B)", () => {
+  const a = { lat: 41.0, lon: 29.0 };
+  const b = { lat: 41.05, lon: 29.05 };
+  // 0.005° behind A (so alongM is negative)
+  const behind = { lat: 40.995, lon: 28.995 };
+  const ahead = { lat: 41.055, lon: 29.055 };
+  const p1 = projectOntoAxis(a, b, behind);
+  const p2 = projectOntoAxis(a, b, ahead);
+  if (p1.alongM >= 0) throw new Error(`expected behind-AlongM negative, got ${p1.alongM}`);
+  if (p2.alongM <= 0) throw new Error(`expected ahead-AlongM positive, got ${p2.alongM}`);
+});
+
+test("projectOntoAxis: degenerate (a == b) returns finite perpM", () => {
+  const a = { lat: 41.0, lon: 29.0 };
+  const b = { lat: 41.0, lon: 29.0 };  // same point - degenerate
+  const p = { lat: 41.01, lon: 29.01 };
+  const proj = projectOntoAxis(a, b, p);
+  if (!Number.isFinite(proj.perpM)) {
+    throw new Error(`expected finite perpM for degenerate a==b, got ${proj.perpM}`);
+  }
+});
+
+test("rankByFairestFromMid with axis projection: on-axis fair beats off-axis slightly unfair", () => {
+  // The new axis-aware tiebreaker: a place on the A->B line with
+  // |Δ|=60s should beat a place equally fair (|Δ|=0) but 2km off-axis.
+  // 2km off-axis = 1000s of fairness bonus, so off-axis needs
+  // |Δ| < 1000s to beat on-axis with |Δ|=60s. Both candidates
+  // satisfy that, so on-axis should win.
+  const a = { lat: 41.0, lon: 29.0 };
+  const b = { lat: 41.0, lon: 29.06 };   // due east line
+  const mid = { lat: 41.0, lon: 29.03 };
+  // On-axis place: midpoint area
+  const onAxis = { lat: 41.0, lon: 29.03, eta_a_s: 900, eta_b_s: 960 };  // Δ=60
+  // Off-axis place but very fair: 2km north of midpoint
+  const offAxis = { lat: 41.018, lon: 29.03, eta_a_s: 900, eta_b_s: 900 };  // Δ=0, ~2km off
+  const ranked = rankByFairestFromMid([offAxis, onAxis], mid, a, b);
+  if (ranked[0].lat !== onAxis.lat) {
+    throw new Error(`expected on-axis to win despite worse |Δ|, got ${JSON.stringify(ranked[0])}`);
+  }
 });
 
 console.log(`\nResults: ${passed} passed, ${failed} failed`);

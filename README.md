@@ -3,17 +3,87 @@
 two places, one fair meeting point.
 
 type two locations, pick what kind of place you want, get a ranked list of
-spots near the geographic midpoint where both people travel roughly the
-same time.
+spots where both people travel roughly the same time.
 
 ## what it does
 
-- geocodes free-text addresses (nominatim / openstreetmap)
-- computes the great-circle midpoint
-- queries openstreetmap for cafes / restaurants / bars / parks nearby
-- asks osrm for driving eta from each person to every candidate
-- ranks by **total travel time first, fairness (|Δ|) as tiebreaker**
-- shows the top 10 on a shared map
+- geocodes free-text addresses (Nominatim + Photon via OpenStreetMap)
+- computes the great-circle midpoint between the two inputs
+- samples anchors along the A→B line, on perpendicular corridors, on the
+  fair-zone tangent chords, and on a 3×3 bbox-grid safety net
+- asks OSRM (via /api/osrm) for driving ETA from each person to every
+  candidate
+- ranks by a fairness+axis-projection score and shows the top 10 on a map
+- lets you share a search via URL, navigate results with the keyboard,
+  and surface explanations for why each place is ranked where it is
+
+## ranking — what does "fair" mean?
+
+three sort modes are available via the tabs:
+
+| tab | criterion | tie-breaker |
+|---|---|---|
+| **fairest & closest** *(default)* | `|eta_a − eta_b|` (driving minutes) + axis-projection penalty (0.05 × off-axis metres) | distance to the geographic midpoint |
+| **most fair** | raw `|eta_a − eta_b|` | total drive time |
+| **shortest total** | `eta_a + eta_b` | order returned |
+
+the default combines three signals. a place is **fair** when both people
+drive roughly the same time. it's **on-axis** when it sits close to the
+A→B line (geometrically, equidistant from both endpoints). and it's
+**close** when the geographic midpoint isn't far away. all three pulled
+into one score means no single dimension can dominate a clear win
+somewhere else.
+
+## features
+
+- 🇹🇷 / 🇬🇧 Turkish + English UI with auto-detect
+- arrow-key navigation of the suggestion dropdown (Enter to pick)
+- keyboard shortcuts: `?` for help, `Cmd/Ctrl+K` to focus input
+- click a result row → pulse the matching pin on the map
+- hover a result row → pulse that pin (and the result's ETA badges light up)
+- "open in Google Maps" / "open in Apple Maps" deep links on every result
+- "explain why" sub-line showing each result's off-axis distance and Δ
+- share URL — both addresses + categories encoded, reloads to the same search
+- dark CARTO tiles matched to the pure-black theme
+- screen-reader friendly: live region announces result counts, focusable
+  results with proper aria-labels
+
+## architecture
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                       browser                              │
+│                                                             │
+│   app.js ───┬─── geocode.js ──→ /api/nominatim             │
+│             │                    /api/photon (POI)          │
+│             ├─── places.js ────→ /api/photon                │
+│             │                    /api/nominatim (POI)      │
+│             │                    /api/overpass              │
+│             ├─── routing.js ───→ /api/osrm                 │
+│             ├─── map.js ────────→ CARTO Dark Matter tiles   │
+│             ├─── i18n.js ─────── (TR / EN + persistence)    │
+│             └─── midpoint.js ── (haversine + ranking + axis │
+│                                 projection — pure, no I/O) │
+└───────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────┐
+│                  Vercel (serverless)                       │
+│                                                             │
+│   /api/nominatim ──→ nominatim.openstreetmap.org           │
+│   /api/photon    ──→ photon.komoot.io                      │
+│   /api/overpass  ──→ overpass.kumi.systems                 │
+│                     overpass-api.de (mirror failover)      │
+│                     overpass.osm.ch                        │
+│   /api/osrm      ──→ router.project-osrm.org               │
+└───────────────────────────────────────────────────────────┘
+```
+
+the proxy layer sidesteps two CORS issues: (1) browsers can't reach some
+upstreams from Vercel's edge IPs because of cross-site rules, and (2) the
+upstreams rate-limit edge IPs faster than browser IPs. running the calls
+server-to-server gets a stable connection at the cost of one extra
+hop per request. in exchange, every endpoint has its own
+`max-age` cache, so repeat searches hit Vercel's CDN.
 
 ## run locally
 
@@ -28,17 +98,14 @@ python3 -m http.server 8080
 # → http://localhost:8080/
 ```
 
-geolocation requires https (or `http://localhost`). vercel gives you https
+geolocation requires https (or `http://localhost`). Vercel gives you https
 for free on deploy.
 
 ## test
 
 ```bash
-# offline tests (haversine + ranking math)
-node tests/test_midpoint.mjs
-
-# live smoke (hits nominatim + overpass + osrm)
-node tests/smoke_live.mjs
+node tests/test_midpoint.mjs     # offline — haversine + ranking math
+node tests/smoke_live.mjs        # live — proxies + upstreams
 ```
 
 ## deploy to vercel
@@ -59,25 +126,25 @@ up the `vercel.json` automatically.
 
 | purpose | service |
 |---|---|
-| geocode | <https://nominatim.openstreetmap.org> |
-| places  | <https://overpass-api.de> (with mirror fallback) |
-| routing | <https://router.project-osrm.org> |
-| map tiles | <https://tile.openstreetmap.org> |
-| map library | <https://leafletjs.org> (cdn) |
-
-all four osm endpoints allow browser origins (cors). nothing leaves your
-browser except requests to those public services.
+| geocode (forward)  | <https://nominatim.openstreetmap.org> (proxy) + Photon fallback |
+| geocode (reverse)  | Photon primary, Nominatim fallback |
+| places (POI)       | Photon (primary), Nominatim, Overpass (mirrored) |
+| routing (ETA)      | <https://router.project-osrm.org> |
+| map tiles          | CARTO Dark Matter (free for low traffic) |
+| map library        | <https://leafletjs.org> (cdn) |
 
 ## privacy
 
 - no accounts, no cookies set by us
-- no server, no logging of your searches
-- only the public osm/osrm endpoints see your queries
-- open `about` in the footer for the short version
+- no server-side storage of your searches
+- the only calls leaving your browser are to the public OSM/OSRM/CARTO
+  services (proxied via `/api/*` to bypass CORS / rate-limits)
+- shared URLs are stored entirely in the URL fragment — they're never
+  sent to any server we control
 
 ## license
 
-mit — see below.
+mit
 
 ```
 MIT License

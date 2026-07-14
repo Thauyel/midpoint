@@ -8,6 +8,7 @@
 // ============================================================
 
 const ENDPOINT = "https://nominatim.openstreetmap.org";
+const FETCH_TIMEOUT_MS = 8000;   // Nominatim is occasionally slow
 
 const BROWSER_LIKE_HEADERS = {
   // Nominatim's usage policy requires identifying ourselves.
@@ -45,21 +46,34 @@ export default async function handler(req, res) {
     url.searchParams.set("addressdetails", "1");
   }
 
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
     const upstream = await fetch(url, {
       headers: {
         ...BROWSER_LIKE_HEADERS,
         "Accept-Language": String(acceptLang || "tr,en"),
       },
+      signal: ctl.signal,
     });
+    clearTimeout(timer);
     const body = await upstream.text();
     res.status(upstream.status);
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
     res.setHeader("Cache-Control", mode === "reverse"
       ? "public, max-age=3600, s-maxage=86400"
-      : "public, max-age=60, s-maxage=300");
+      // Search results are stable enough to cache 5min edge, 30min CDN.
+      // Same query within that window returns the cached payload, which
+      // both speeds up repeat queries and stays under Nominatim's 1 req/s
+      // soft limit.
+      : "public, max-age=120, s-maxage=300");
     res.send(body);
   } catch (e) {
-    res.status(502).json({ error: "upstream_unreachable", message: String(e?.message || e) });
+    clearTimeout(timer);
+    const isTimeout = e?.name === "AbortError";
+    res.status(isTimeout ? 504 : 502).json({
+      error: isTimeout ? "nominatim_timeout" : "nominatim_unreachable",
+      message: String(e?.message || e),
+    });
   }
 }

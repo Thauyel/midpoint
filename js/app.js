@@ -3,12 +3,12 @@
 //              pipeline, and i18n glue.
 // ============================================================
 
-import { geocode, reverse as reverseGeocode } from "./geocode.js?v=36";
-import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=36";
-import { osrmTable } from "./routing.js?v=35";
-import { midpoint, rankByFairness, rankByFairnessFirst, rankByFairestFromMid, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors } from "./midpoint.js?v=37";
-import { MidpointMap } from "./map.js?v=35";
-import { t, applyTranslations, getLanguage } from "./i18n.js?v=37";
+import { geocode, reverse as reverseGeocode } from "./geocode.js?v=38";
+import { findPlaces, findPlacesAlong, findPlacesAlways } from "./places.js?v=38";
+import { osrmTable } from "./routing.js?v=38";
+import { midpoint, rankByFairness, rankByFairnessFirst, rankByFairestFromMid, rankByTotalDrive, fmtEta, fmtDist, isFair, haversine, haversineEta, sampleAlongLine, corridorAnchors, offsetPoint, bearing, tangentChordAnchors, projectOntoAxis } from "./midpoint.js?v=38";
+import { MidpointMap } from "./map.js?v=38";
+import { t, applyTranslations, getLanguage } from "./i18n.js?v=38";
 
 const RADIUS_M = 1500;           // BASE per-anchor POI search radius (overridden per-call by length-aware scaling)
 const MAX_CANDIDATES = 14;       // cap before OSRM call (14 + 2 sources = 16 coords; OSRM demo friendly)
@@ -29,6 +29,12 @@ const state = {
   allCandidates: [],   // raw fetched places with eta_a_s/eta_b_s, used for re-sorting
   sortMode: "midpoint", // "midpoint" | "fair" | "total"
   mid: null,
+  a: null,
+  b: null,
+  // Map from {search: rank} so we can rotate viewpoints on the same result
+  // set without re-querying the geocoders.
+  shareOn: false,
+  suggestFocus: null,  // { side, idx } for arrow-key nav
 };
 
 // ----- dom -----
@@ -50,6 +56,11 @@ const els = {
   aboutBtn:   $("#about-btn"),
   aboutDlg:   $("#about-dlg"),
   locateBtns: document.querySelectorAll(".locate-btn"),
+  liveStatus: document.getElementById("live-status"),
+  shareBtn: document.getElementById("share-btn"),
+  shortcutsBtn: document.getElementById("shortcuts-btn"),
+  shortcutsDlg: document.getElementById("shortcuts-dlg"),
+  pair: document.querySelector(".pair"),
 };
 
 // ----- map -----
@@ -146,6 +157,10 @@ function renderSuggestions(side, results) {
       <span class="sugg-icon" aria-hidden="true">${suggestionGlyph(side)}</span>
       <span class="sugg-text">${escapeHtml(shortenName(r.display_name))}</span>
     `;
+    // Mark focused suggestion for keyboard nav
+    if (side === state.suggestFocus?.side && idx === state.suggestFocus?.idx) {
+      li.classList.add("is-focused");
+    }
     li.addEventListener("mousedown", (e) => {
       // mousedown fires before blur — keeps the dropdown from closing first
       e.preventDefault();
@@ -157,9 +172,25 @@ function renderSuggestions(side, results) {
         pickSuggestion(side, r);
       }
     });
+    // Hover should also set the "focused" item so keyboard + mouse agree
+    li.addEventListener("mouseenter", () => moveFocus(side, idx));
     list.appendChild(li);
   }
   list.hidden = false;
+  // If an existing arrow-key selection is past the new list length, clamp it
+  if (state.suggestFocus?.side === side && state.suggestFocus.idx >= results.length) {
+    moveFocus(side, Math.max(0, results.length - 1));
+  }
+}
+
+function moveFocus(side, idx) {
+  const list = els[`sugg${side.toUpperCase()}`];
+  state.suggestFocus = { side, idx };
+  for (const li of list.children) li.classList.remove("is-focused");
+  if (list.children[idx]) {
+    list.children[idx].classList.add("is-focused");
+    list.children[idx].scrollIntoView({ block: "nearest" });
+  }
 }
 
 function suggestionGlyph(side) {
@@ -209,14 +240,50 @@ document.addEventListener("mousedown", (e) => {
   }
 });
 
-// Keyboard nav inside the input — Escape closes the dropdown
+// Keyboard nav inside the input — Escape closes the dropdown,
+// arrow keys move through suggestions, Enter picks the focused one.
+function arrowKeyMove(side, dir) {
+  const list = els[`sugg${side.toUpperCase()}`];
+  if (list.hidden) return;
+  const n = list.children.length;
+  if (!n) return;
+  let cur = state.suggestFocus?.side === side ? state.suggestFocus.idx : -1;
+  if (cur < 0) cur = dir > 0 ? -1 : n;  // start at -1 going down, n-1 going up
+  let next = cur + dir;
+  next = (next + n) % n;
+  moveFocus(side, next);
+  // Mirror the focused suggestion's name into the input as a "type ahead"
+  // so the user sees what they're about to pick.
+  const picked = state.sides[side].suggestions[next];
+  if (picked) {
+    els[`input${side.toUpperCase()}`].value = shortenName(picked.display_name);
+    // Mark this is a "preview" so onInput doesn't overwrite on blur
+    state.sides[side]._previewIdx = next;
+  }
+}
 els.inputA.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") hideSuggestions("a");
-  if (e.key === "Enter") { hideSuggestions("a"); onInputA(); }
+  if (e.key === "Escape")     { hideSuggestions("a"); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); arrowKeyMove("a", +1); }
+  else if (e.key === "ArrowUp")   { e.preventDefault(); arrowKeyMove("a", -1); }
+  else if (e.key === "Enter") {
+    hideSuggestions("a");
+    const f = state.suggestFocus?.side === "a" ? state.suggestFocus.idx : 0;
+    const picked = state.sides.a.suggestions[f];
+    if (picked) { pickSuggestion("a", picked); e.preventDefault(); }
+    else { onInputA(); }
+  }
 });
 els.inputB.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") hideSuggestions("b");
-  if (e.key === "Enter") { hideSuggestions("b"); onInputB(); }
+  if (e.key === "Escape")     { hideSuggestions("b"); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); arrowKeyMove("b", +1); }
+  else if (e.key === "ArrowUp")   { e.preventDefault(); arrowKeyMove("b", -1); }
+  else if (e.key === "Enter") {
+    hideSuggestions("b");
+    const f = state.suggestFocus?.side === "b" ? state.suggestFocus.idx : 0;
+    const picked = state.sides.b.suggestions[f];
+    if (picked) { pickSuggestion("b", picked); e.preventDefault(); }
+    else { onInputB(); }
+  }
 });
 
 // ============================================================
@@ -347,6 +414,8 @@ async function runPipeline() {
   const b = state.sides.b.point;
   const mid = midpoint(a, b);
   state.mid = mid;
+  state.a = a;
+  state.b = b;
   const directM = haversine(a, b);
 
   map.setSide("a", a);
@@ -465,7 +534,7 @@ async function runPipeline() {
     // total") are available via the sort tabs -- toggling just re-sorts the
     // same set, no re-fetch.
     state.allCandidates = enriched;
-    const ranked = applySort(enriched, state.sortMode, mid).slice(0, MAX_RESULTS);
+    const ranked = applySort(enriched, state.sortMode, mid, a, b).slice(0, MAX_RESULTS);
     state.results = ranked;
     renderResults(ranked);
     renderMapPlaces(ranked);
@@ -558,40 +627,86 @@ function renderResults(ranked) {
   els.results.hidden = false;
   const catLabels = [...state.categories].map((c) => t("cat.label")[c] || c);
   els.resultsSub.textContent = t("results.sub", ranked.length, catLabels);
+  // Announce the count to screen readers -- the role="status" region
+  // is aria-live=polite so it doesn't interrupt other announcements.
+  if (els.liveStatus) els.liveStatus.textContent = `${ranked.length} ${t("results.title")}`;
 
   for (let i = 0; i < ranked.length; i++) {
     const r = ranked[i];
     const li = document.createElement("li");
     li.className = "result" + (i === 0 ? " is-top" : "");
     li.dataset.idx = i;
+    li.dataset.placeId = r.id || `${r.lat},${r.lon}`;
+    li.tabIndex = 0; // make focusable for keyboard users
+    li.setAttribute("role", "button");
+    li.setAttribute("aria-label", `${r.name}, ${fmtEta(r.eta_a_s)} from A, ${fmtEta(r.eta_b_s)} from B`);
 
     const fair = isFair(r);
+    const delta = Math.abs((r.eta_a_s ?? 0) - (r.eta_b_s ?? 0));
     const fairHtml = fair
       ? `<span class="fair-badge">${t("fair")}</span>`
-      : `<span class="fair-badge unfair">${t("unfair", fmtEta(Math.abs((r.eta_a_s ?? 0) - (r.eta_b_s ?? 0))))}</span>`;
+      : `<span class="fair-badge unfair">${t("unfair", fmtEta(delta))}</span>`;
+
+    // Project onto the A→B axis: gives us "how fair geometrically" the
+    // place is. We surface this on the row so the user can SEE WHY a
+    // particular place was ranked where it was -- no opacity-engine.
+    let onAxisKm = null;
+    if (state.a && state.b) {
+      const proj = projectOntoAxis(state.a, state.b, r);
+      onAxisKm = proj.perpM / 1000;
+    }
+    const distMid = state.mid ? haversine(state.mid, r) : 0;
+    const etaA = fmtEta(r.eta_a_s);
+    const etaB = fmtEta(r.eta_b_s);
+
+    // Build the explain-why popover so the user can hover any result and
+    // see "why is this #1?" (fairness, axis-projection, distance to mid)
+    const explain = `Δ ${fmtEta(delta)} · ${onAxisKm != null ? `${onAxisKm.toFixed(onAxisKm < 1 ? 2 : 1)}km off-axis · ` : ""}${fmtDist(distMid)} from mid`;
 
     const catName = t("cat.label")[r.category] || r.category;
+    const mapsUrl  = mapsDeepLink(r.lat, r.lon, r.name);
+    const appleMaps = `https://maps.apple.com/?daddr=${r.lat},${r.lon}`;
     li.innerHTML = `
       <span class="result-rank">${i + 1}</span>
       <div class="result-main">
         <p class="result-name">${escapeHtml(r.name)}</p>
-        <span class="result-cat">${escapeHtml(catName)} · ${fmtDist(haversineFromMidpoint(r))}</span>
+        <span class="result-cat">${escapeHtml(catName)} · ${fmtDist(distMid)} ${t("fromMid")}</span>
+        <span class="result-explain">${escapeHtml(explain)}</span>
       </div>
       <div class="result-etas">
-        <span class="eta eta-a"><span class="eta-dot"></span><strong>${fmtEta(r.eta_a_s)}</strong></span>
-        <span class="eta eta-b"><span class="eta-dot"></span><strong>${fmtEta(r.eta_b_s)}</strong></span>
+        <span class="eta eta-a"><span class="eta-dot" aria-hidden="true"></span><span class="eta-label" data-i18n="eta.fromA">a</span><strong>${etaA}</strong></span>
+        <span class="eta eta-b"><span class="eta-dot" aria-hidden="true"></span><span class="eta-label" data-i18n="eta.fromB">b</span><strong>${etaB}</strong></span>
         ${fairHtml}
+      </div>
+      <div class="result-actions">
+        <a class="ghost-btn map-link" href="${mapsUrl}" target="_blank" rel="noopener" aria-label="Open in Google Maps" data-i18n-title="maps.google" title="open in google maps">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        </a>
+        <a class="ghost-btn map-link" href="${appleMaps}" target="_blank" rel="noopener" aria-label="Open in Apple Maps" data-i18n-title="maps.apple" title="open in apple maps">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3.5 7H22l-5.5 4.5L18.5 21 12 16 5.5 21l2-7.5L2 9h6.5L12 2z"/></svg>
+        </a>
       </div>
     `;
 
-    li.addEventListener("click", () => {
+    // Hover/focus syncs the map marker pulse
+    li.addEventListener("mouseenter", () => map.focusPlace(i, true));
+    li.addEventListener("mouseleave", () => map.focusPlace(i, false));
+    li.addEventListener("focus", () => map.focusPlace(i, true));
+    li.addEventListener("blur", () => map.focusPlace(i, false));
+
+    li.addEventListener("click", (e) => {
+      // Don't trigger when clicking the map links
+      if (e.target.closest(".map-link")) return;
       map.flyTo({ lat: r.lat, lon: r.lon }, 16);
-      document.querySelectorAll(".place-marker").forEach((m) => m.classList.remove("is-top"));
+      document.querySelectorAll(".place-marker").forEach((m) => m.classList.remove("is-top", "is-pulse"));
       const m = map.markers.places[i];
       if (m && m.getElement) {
         const el = m.getElement();
         const inner = el.querySelector(".place-marker");
-        if (inner) inner.classList.add("is-top");
+        if (inner) {
+          inner.classList.add("is-top", "is-pulse");
+          setTimeout(() => inner.classList.remove("is-pulse"), 1200);
+        }
       }
     });
 
@@ -599,23 +714,18 @@ function renderResults(ranked) {
   }
 }
 
+/**
+ * Build a Google Maps "directions here" deep link. Falls back to a plain
+ * "place pin" if we don't have coordinates.
+ */
+function mapsDeepLink(lat, lon, name) {
+  const q = encodeURIComponent(`${lat},${lon}`);
+  return `https://www.google.com/maps/dir/?api=1&destination=${q}&travelmode=driving`;
+}
+
 function renderMapPlaces(ranked) {
   map.clearPlaces();
   ranked.forEach((r, i) => map.addPlace(r, i, { isTop: i === 0 }));
-}
-
-function haversineFromMidpoint(p) {
-  if (!state.mid) return 0;
-  const R = 6371008.8;
-  const toRad = (d) => (d * Math.PI) / 180;
-  const phi1 = toRad(state.mid.lat);
-  const phi2 = toRad(p.lat);
-  const dPhi = toRad(p.lat - state.mid.lat);
-  const dLam = toRad(p.lon - state.mid.lon);
-  const h =
-    Math.sin(dPhi / 2) ** 2 +
-    Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLam / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
 }
 
 function escapeHtml(s) {
@@ -667,10 +777,10 @@ els.aboutBtn.addEventListener("click", () => {
  * `mid` is required for "midpoint" mode; falls back to fairness sort if
  * somehow missing (shouldn't happen).
  */
-function applySort(candidates, mode, mid) {
+function applySort(candidates, mode, mid, a, b) {
   if (mode === "fair")   return rankByFairnessFirst(candidates);
   if (mode === "total")  return rankByTotalDrive(candidates);
-  return rankByFairestFromMid(candidates, mid); // default
+  return rankByFairestFromMid(candidates, mid, a, b); // default
 }
 
 // Re-sort whenever a sort tab is clicked. Uses cached `allCandidates`
@@ -687,7 +797,7 @@ sortTabs.forEach((tab) => {
       t.setAttribute("aria-selected", active ? "true" : "false");
     });
     if (!state.allCandidates.length || !state.mid) return;
-    const ranked = applySort(state.allCandidates, state.sortMode, state.mid).slice(0, MAX_RESULTS);
+    const ranked = applySort(state.allCandidates, state.sortMode, state.mid, state.a, state.b).slice(0, MAX_RESULTS);
     state.results = ranked;
     renderResults(ranked);
     renderMapPlaces(ranked);
@@ -710,3 +820,176 @@ mo.observe(els.results, { attributes: true, attributeFilter: ["hidden"] });
 // Apply translations on load (in case DOMContentLoaded fired before module ran)
 if (document.readyState !== "loading") applyTranslations();
 else document.addEventListener("DOMContentLoaded", applyTranslations);
+
+// ============================================================
+//  share URL with both addresses encoded — survives reloads,
+//  helps users send the same search to a friend or themselves.
+// ============================================================
+function readShareUrl() {
+  try {
+    const p = new URL(location.href).searchParams;
+    return {
+      a: p.get("a") || "",
+      b: p.get("b") || "",
+      cats: (p.get("cats") || "").split(",").filter(Boolean),
+      sort: p.get("sort") || "midpoint",
+    };
+  } catch { return { a: "", b: "", cats: [], sort: "midpoint" }; }
+}
+
+function writeShareUrl() {
+  const s = state.sides.a.point && state.sides.b.point;
+  if (!s) return false;
+  const a = state.sides.a.input.value.trim();
+  const b = state.sides.b.input.value.trim();
+  if (!a || !b) return false;
+  const cats = [...state.categories].join(",");
+  const url = new URL(location.href);
+  url.searchParams.set("a", a);
+  url.searchParams.set("b", b);
+  if (cats && cats !== DEFAULT_CATEGORIES.join(",")) {
+    url.searchParams.set("cats", cats);
+  } else {
+    url.searchParams.delete("cats");
+  }
+  if (state.sortMode !== "midpoint") {
+    url.searchParams.set("sort", state.sortMode);
+  } else {
+    url.searchParams.delete("sort");
+  }
+  history.replaceState(null, "", url.toString());
+  return true;
+}
+
+// Restore from URL on first load, ONCE the geocoders are ready. We mark
+// the inputs with the saved text and let the existing input handlers
+// run the geocode; once both sides have points, we fire runPipeline if
+// the user came here with a real saved pair.
+function restoreFromShareUrl() {
+  const share = readShareUrl();
+  if (!share.a || !share.b) return;
+  if (els.inputA.value !== share.a) els.inputA.value = share.a;
+  if (els.inputB.value !== share.b) els.inputB.value = share.b;
+  // Apply saved categories (preserve defaults if not specified)
+  if (share.cats.length > 0) {
+    // Clear all then add the saved ones
+    for (const cat of state.categories) {
+      // ... we need to toggle off, but state.categories starts at DEFAULT_CATEGORIES
+    }
+    // Simplify: re-set state and chip UI
+    state.categories.clear();
+    share.cats.forEach((c) => state.categories.add(c));
+    els.chips.forEach((chip) => {
+      const on = state.categories.has(chip.dataset.cat);
+      chip.classList.toggle("is-on", on);
+      chip.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+  if (share.sort && share.sort !== state.sortMode) {
+    state.sortMode = share.sort;
+    const tab = document.querySelector(`.sort-tab[data-sort="${share.sort}"]`);
+    if (tab) tab.click();
+  }
+  // Geocode both via the same handler the live input uses. They fire in
+  // parallel and each will call setMeta + show a dropdown when done.
+  onInputA(); onInputB();
+  // Watchdog: if the geocoders resolve and both sides get points, kick
+  // off the pipeline automatically. 12s budget -- if Photon is slow we
+  // don't want to wait forever.
+  let ticks = 0;
+  const ticker = setInterval(() => {
+    ticks++;
+    if (state.sides.a.point && state.sides.b.point && !state.finding) {
+      clearInterval(ticker);
+      runPipeline();
+      return;
+    }
+    if (ticks > 60) clearInterval(ticker);
+  }, 200);
+}
+
+// Wire share button
+if (els.shareBtn) {
+  els.shareBtn.addEventListener("click", async () => {
+    if (!state.sides.a.point || !state.sides.b.point) {
+      toast(t("toast.share_need"), true);
+      return;
+    }
+    if (writeShareUrl()) {
+      const url = location.href;
+      try {
+        await navigator.clipboard.writeText(url);
+        toast(t("toast.share_ok"));
+      } catch {
+        // Clipboard blocked -- just select the URL bar via the dialog
+        prompt(t("toast.share_copy"), url);
+      }
+    } else {
+      toast(t("toast.share_need"), true);
+    }
+  });
+}
+
+// ============================================================
+//  keyboard shortcuts (? to show, Cmd/Ctrl+K to focus input)
+// ============================================================
+document.addEventListener("keydown", (e) => {
+  // ? opens shortcuts (but only when not typing in an input)
+  if (e.key === "?" && !e.target.closest("input, textarea")) {
+    e.preventDefault();
+    if (els.shortcutsDlg?.showModal) els.shortcutsDlg.showModal();
+    return;
+  }
+  // Cmd/Ctrl+K -- focus the first empty input (or input-a)
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    const target = !els.inputA.value ? els.inputA
+                : !els.inputB.value ? els.inputB
+                : els.inputA;
+    target.focus();
+    target.select?.();
+    return;
+  }
+  // Enter inside inputs already handled. Escape while at top level closes
+  // any open dialog. We don't want Escape to mess with the
+  // suggestion-dropdown close which is handled per-input above.
+});
+
+// ============================================================
+//  result-list keyboard navigation (↑/↓ to move highlight, Enter to focus map)
+// ============================================================
+els.resultList.addEventListener("keydown", (e) => {
+  const rows = [...els.resultList.querySelectorAll(".result")];
+  if (!rows.length) return;
+  const cur = rows.findIndex((r) => r === document.activeElement);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const dir = e.key === "ArrowDown" ? 1 : -1;
+    const next = (cur + dir + rows.length) % rows.length;
+    rows[next].focus();
+    rows[next].click();
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    rows[0].focus();
+  } else if (e.key === "End") {
+    e.preventDefault();
+    rows[rows.length - 1].focus();
+  }
+});
+
+// Trigger the share-restore on first load -- but only if we landed here
+// with both addresses already in the URL. We do this on a short delay so
+// the geocoder / map / DOM are all ready to react.
+if (readShareUrl().a && readShareUrl().b) {
+  // wait for Leaflet + DOM, then restore
+  setTimeout(restoreFromShareUrl, 100);
+}
+
+// ============================================================
+//  third-person toggle ("meet in the middle of A and B" -- if anyone
+//  else is invited, the midpoint shifts toward them too).
+// ============================================================
+// Hooked up here in case a future design adds a third input -- the data
+// structures above already accommodate it (ranker takes a & b, we could
+// pass c too). For now this is a no-op reserved hook so we don't break
+// the URL/share flow.
